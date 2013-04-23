@@ -1,0 +1,14 @@
+
+libdmn is copied from gdnsd.  I get the whole thing about embedding
+  library sources.  I'm the author of both projects, and libdmn's API
+  and code aren't sufficiently factored out to start making real releases
+  of it as a stable library independent of the gdnsd project.  I hope
+  to remedy that situation, but part of the process of finding the problems
+  is trying to use it in other projects...
+
+Changes from gdnsd's master branch circa gdnsd-1.8.2:
+  Support non-pthreads build by wrapping pthreads-specific stuff in:
+      #ifdef LIBDMN_THREADED
+    and providing alternative unthreaded variant code where applicable.
+    (note this change probably never merges elsewhere, since in a shared
+     lib we'd probably always link libpthread and support threads, right?)

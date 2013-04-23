@@ -1,0 +1,38 @@
+# Autotools junk at top level
+/autom4te.cache/
+/aclocal.m4
+/config.h
+/config.h.in
+/config.log
+/config.status
+/configure
+/libtool
+/stamp-h1
+/acaux
+/m4
+
+# Distribution tarballs
+/vhtcpd-*.tar.xz
+
+# Built, installed binaries
+/src/vhtcpd
+
+# Various tool outputs in all dirs
+Makefile
+Makefile.in
+.dirstamp
+.deps
+.libs
+*.o
+*.so
+*.lo
+*.la
+*.gcov
+*.trucov
+*.info
+*.gcda
+*.gcno
+*.tmp
+*.log
+*.trs
+*~

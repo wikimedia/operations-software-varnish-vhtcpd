@@ -1,0 +1,25 @@
+
+Overall flow of the code:
+--------------------------
+Single-threaded using a libev runloop.
+One receiver (multicast listener), multiple
+  HTTP purgers (per-cache), with a shared
+  queue of URLs.
+No blocking on i/o.
+Receiver gets URLs from multicast, filters
+  via regex on the URL hostname, and puts
+  the matching ones into all purger queues.
+Each purger pulls one URL at a time from its queue,
+  builds an HTTP request from it, and then
+  completes that transaction before dequeueing
+  another.
+
+Notes on HTCP performance/reliability issues, some of it WMF-specific:
+-----------------------------------------------------------------------
+
+0) Could stand to split up our multicast addresses
+1) Should look at whether we can get Varnish to allow keepalive on
+  the HTTP connections from this daemon for PURGE requests.  Currently
+  it does Connection: close on every response.
+2) Could consider future upgrade to something like PGM transport
+  if we're facing any significant multicast loss at the network level.
