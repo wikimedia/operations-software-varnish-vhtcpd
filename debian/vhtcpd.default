@@ -7,4 +7,5 @@
 #
 
 # Additional options that are passed to the Daemon.
-DAEMON_OPTS=""
+DAEMON_OPTS="-m 224.0.0.1 -c 127.0.0.1:6081"
+# ^ please edit for your local situation...

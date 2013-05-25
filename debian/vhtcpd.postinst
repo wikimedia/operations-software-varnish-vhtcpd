@@ -1,0 +1,15 @@
+#!/bin/sh
+set -e
+
+if test "$1" = "configure"; then
+    if ! getent passwd vhtcpd > /dev/null; then
+        adduser --quiet --system --group \
+		--home /var/run \
+		--no-create-home \
+		vhtcpd
+    fi
+fi
+
+#DEBHELPER#
+
+exit 0

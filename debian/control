@@ -10,7 +10,7 @@ Homepage: https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vh
 
 Package: vhtcpd
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
 Description: HTCP-to-PURGE forwarder for Varnish
  A network daemon that listens for multicast HTCP cache purge requests
  and forwards them to Varnish via the HTTP PURGE method.
