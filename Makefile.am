@@ -5,9 +5,7 @@ ACLOCAL_AMFLAGS = -I m4
 # Subdirectories to recurse into
 SUBDIRS = src
 
-#XXX
-#MISC_DOCS = README.md INSTALL AUTHORS COPYING NEWS
-#EXTRA_DIST = autogen.sh qa docs.am pkg
+EXTRA_DIST = t/pktgen.pl
 
 # Some junk autotools doesn't seem to clean on its own
 DISTCLEANFILES = config.h.in~ configure.ac~
@@ -21,7 +19,7 @@ libtool: $(LIBTOOL_DEPS)
 all-local: libtool
 
 install-exec-hook:
-	$(MKDIR_P) "$(DESTDIR)$(VHTCPD_SYSRUNDIR)/vhtcpd";
+	$(MKDIR_P) "$(DESTDIR)$(VHTCPD_SYSRUNDIR)";
 	@id vhtcpd >/dev/null 2>&1; if test $$? -ne 0; then \
 		echo; \
 		echo === READ ME ===; \
