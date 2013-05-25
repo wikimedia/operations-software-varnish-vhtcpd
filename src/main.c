@@ -43,7 +43,7 @@
 static const char def_ifaddr[] = "0.0.0.0:4827";
 #define DEF_USERNAME PACKAGE_NAME
 #define DEF_PIDFILE VHTCPD_SYSRUNDIR "/" PACKAGE_NAME ".pid"
-#define DEF_Q_MB 64U
+#define DEF_Q_MB 256U
 #define DEF_MCAST_PORT 4827U
 #define DEF_STATS_FILE "/tmp/" PACKAGE_NAME ".stats"
 
@@ -56,8 +56,8 @@ static void usage(const char* argv0) {
         "  -p -- Pidfile pathname\n"
         "  -a -- Multicast local listen IP[:Port] (port defaults to %u)\n"
         "  -r -- Regex filter for valid purge hostnames (POSIX Extended, default unfiltered)\n"
-        "  -l -- Queue limit in MB (per cache)\n"
-        "  -s -- Stats output filename"
+        "  -l -- Queue limit in MB\n"
+        "  -s -- Stats output filename\n"
         "  -m -- Multicast address (required, multiple allowed)\n"
         "  -c -- Cache IP:Port (required, multiple allowed)\n"
         "<action> is one of:\n"
