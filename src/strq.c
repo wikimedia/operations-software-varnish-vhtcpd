@@ -91,7 +91,7 @@ static void assert_queue_sane(strq_t* q) {
     for(unsigned i = 0; i < q->num_vheads; i++)
         dmn_assert(q->vheads[i] < q->q_alloc);
     dmn_assert(q->str_head < q->str_alloc);
-    dmn_assert(q->str_tail < q->str_alloc);
+    dmn_assert(q->str_tail <= q->str_alloc);
     if(q->q_size) {
         dmn_assert(q->q_head != q->q_tail);
         const unsigned itermask = q->q_alloc - 1;
