@@ -118,6 +118,7 @@ typedef enum {
 } purger_state_t;
 
 // for debug logging
+#ifndef NDEBUG
 static const char* state_strs[] = {
     "NOTCONN_IDLE",
     "CONNECTING",
@@ -126,6 +127,7 @@ static const char* state_strs[] = {
     "RECVWAIT",
     "CONN_IDLE",
 };
+#endif
 
 struct purger {
     purger_state_t state;
