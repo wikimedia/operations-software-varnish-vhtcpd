@@ -1,5 +1,5 @@
 AC_PREREQ([2.68])
-AC_INIT([vhtcpd],[0.0.2],[bblack@wikimedia.org],[vhtcpd],[https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git])
+AC_INIT([vhtcpd],[0.0.3],[bblack@wikimedia.org],[vhtcpd],[https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git])
 AC_CONFIG_SRCDIR([src/main.c])
 AC_CONFIG_AUX_DIR([acaux])
 AM_INIT_AUTOMAKE([1.11.3 dist-xz no-dist-gzip foreign tar-ustar -Wall])

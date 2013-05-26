@@ -91,7 +91,7 @@ static void assert_queue_sane(strq_t* q) {
     for(unsigned i = 0; i < q->num_vheads; i++)
         dmn_assert(q->vheads[i] < q->q_alloc);
     dmn_assert(q->str_head < q->str_alloc);
-    dmn_assert(q->str_tail < q->str_alloc);
+    dmn_assert(q->str_tail <= q->str_alloc);
     if(q->q_size) {
         dmn_assert(q->q_head != q->q_tail);
         const unsigned itermask = q->q_alloc - 1;
@@ -138,7 +138,10 @@ strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads) {
     return q;
 }
 
-unsigned strq_get_size(const strq_t* q) { return q->q_size; }
+unsigned strq_is_empty(const strq_t* q, unsigned vhead) {
+    dmn_assert(q); dmn_assert(vhead < q->num_vheads);
+    return (q->vheads[vhead] == q->q_tail);
+}
 
 const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead) {
     dmn_assert(q); dmn_assert(len_outptr); dmn_assert(vhead < q->num_vheads);

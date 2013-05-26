@@ -17,6 +17,9 @@
 # Built, installed binaries
 /src/vhtcpd
 
+# Test binaries
+/src/test_strq
+
 # Various tool outputs in all dirs
 Makefile
 Makefile.in
