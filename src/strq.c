@@ -138,7 +138,10 @@ strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads) {
     return q;
 }
 
-unsigned strq_get_size(const strq_t* q) { return q->q_size; }
+unsigned strq_is_empty(const strq_t* q, unsigned vhead) {
+    dmn_assert(q); dmn_assert(vhead < q->num_vheads);
+    return (q->vheads[vhead] == q->q_tail);
+}
 
 const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead) {
     dmn_assert(q); dmn_assert(len_outptr); dmn_assert(vhead < q->num_vheads);

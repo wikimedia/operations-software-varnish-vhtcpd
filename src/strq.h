@@ -24,8 +24,8 @@ typedef struct strq strq_t;
 // Create a new queue for strings
 strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads);
 
-// Get length of queue
-unsigned strq_get_size(const strq_t* q);
+// Anything pending for this vhead?
+unsigned strq_is_empty(const strq_t* q, unsigned vhead);
 
 // Remove a string from the queue.  NULL retval
 //   if queue is empty.  Note that the returned string

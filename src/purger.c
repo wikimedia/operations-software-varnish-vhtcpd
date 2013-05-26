@@ -711,7 +711,7 @@ void purger_ping(purger_t* s) {
     purger_assert_sanity(s);
 
     // ping is called immediately after an enqueue...
-    dmn_assert(strq_get_size(s->queue));
+    dmn_assert(!strq_is_empty(s->queue, s->vhead));
 
     // enqueue can happen in any state, but actions differ:
     switch(s->state) {
