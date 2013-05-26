@@ -203,7 +203,7 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
 }
 
 receiver_t* receiver_new(struct ev_loop* loop, const regex_t* matcher, strq_t* queue, purger_t** purgers, unsigned num_purgers, int lsock) {
-    dmn_assert(loop); dmn_assert(matcher); dmn_assert(queue); dmn_assert(purgers); dmn_assert(num_purgers);
+    dmn_assert(loop); dmn_assert(queue); dmn_assert(purgers); dmn_assert(num_purgers);
 
     receiver_t* r = malloc(sizeof(receiver_t));
     r->inbuf = malloc(INBUF_SIZE);
