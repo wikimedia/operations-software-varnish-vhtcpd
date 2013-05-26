@@ -654,7 +654,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
             purger_connect(s);
             break;
         case PST_RECVWAIT:
-            dmn_log_warn("recv from %s timed out", dmn_logf_anysin(&s->daddr));
+            dmn_log_warn("recv from %s timed out after receiving %u bytes", dmn_logf_anysin(&s->daddr), s->inbuf_parsed);
             s->outbuf_written = 0;
             s->inbuf_parsed = 0;
             ev_io_stop(s->loop, s->read_watcher);
