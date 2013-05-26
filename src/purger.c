@@ -47,20 +47,11 @@
 // this buffer holds the complete HTTP response we get
 #define INBUF_SIZE 4096U
 
-// how long we wait after a connect() failure before trying again
-// XXX - do some backoff here...
-#define SECS_CONN_WAIT 2U
-
-// timeout for completion of a whole send->recv cycle, before we give
-//   up and call the connection useless (kill it and reconnect).
-// when initially connect()ing, the connection attempt is included
-//   in the total time to complete the first i/o cycle.
-#define SECS_CONN_IO 3U
-
-// timeout in connected/idle state to disconnect from server
-//   ideally should be tuned such that we disconnect before varnish
-//   disconnects us.
-#define SECS_CONN_IDLE 23U
+// initial and maximum wait betwen connect() attempts when connects are failing
+//  and/or timing out.  The wait doubles after every failure (but limited to the
+//  max), and is reset to initial value on connection success.
+#define CONN_WAIT_INIT 1U
+#define CONN_WAIT_MAX 32U
 
 // These are the 6 possible states of the purger object.
 // Note in the state transition code that we often *could* skip
@@ -144,6 +135,9 @@ struct purger {
     unsigned outbuf_size;    // total size of current buffered message
     unsigned outbuf_written; // bytes of the message sent so far...
     unsigned inbuf_parsed;
+    unsigned io_timeout;     // these two are fixed via config
+    unsigned idle_timeout;   // these two are fixed via config
+    unsigned conn_wait_timeout; // dynamic, rises until success...
     dmn_anysin_t daddr;
     char* outbuf;
     char* inbuf;
@@ -367,7 +361,9 @@ static void purger_connect(purger_t* s) {
             shutdown(s->fd, SHUT_RDWR);
             close(s->fd);
             s->fd = -1;
-            ev_timer_set(s->timeout_watcher, SECS_CONN_WAIT, 0.);
+            if(s->conn_wait_timeout < CONN_WAIT_MAX)
+                s->conn_wait_timeout <<= 1;
+            ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
             ev_timer_start(s->loop, s->timeout_watcher);
         }
         else {
@@ -375,18 +371,19 @@ static void purger_connect(purger_t* s) {
             s->state = PST_CONNECTING;
             ev_io_set(s->write_watcher, s->fd, EV_WRITE);
             ev_io_start(s->loop, s->write_watcher);
-            ev_timer_set(s->timeout_watcher, SECS_CONN_IO, 0.);
+            ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
             ev_timer_start(s->loop, s->timeout_watcher);
         }
     }
     else {
         // immediate success, straight to send attempt
         s->state = PST_SENDWAIT;
+        s->conn_wait_timeout = CONN_WAIT_INIT;
         ev_io_set(s->write_watcher, s->fd, EV_WRITE);
         ev_io_start(s->loop, s->write_watcher);
         ev_io_set(s->read_watcher, s->fd, EV_READ);
         ev_io_start(s->loop, s->read_watcher);
-        ev_timer_set(s->timeout_watcher, SECS_CONN_IO, 0.);
+        ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
         ev_timer_start(s->loop, s->timeout_watcher);
         ev_invoke(s->loop, s->write_watcher, EV_WRITE);
     }
@@ -411,14 +408,17 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
             shutdown(s->fd, SHUT_RDWR);
             close(s->fd);
             s->fd = -1;
+            if(s->conn_wait_timeout < CONN_WAIT_MAX)
+                s->conn_wait_timeout <<= 1;
             ev_io_stop(s->loop, s->write_watcher);
             ev_timer_stop(s->loop, s->timeout_watcher);
-            ev_timer_set(s->timeout_watcher, SECS_CONN_WAIT, 0.);
+            ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
             ev_timer_start(s->loop, s->timeout_watcher);
             return;
         }
         else { // successful connect(), alter state and fall through to the first send attempt
             s->state = PST_SENDWAIT;
+            s->conn_wait_timeout = CONN_WAIT_INIT;
             ev_io_set(s->read_watcher, s->fd, EV_READ);
             ev_io_start(s->loop, s->read_watcher);
         }
@@ -590,14 +590,14 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             }
             else { // maintain connection
                 if(!dequeue_to_outbuf(s)) {
-                    ev_timer_set(s->timeout_watcher, SECS_CONN_IO, 0.);
+                    ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
                     ev_timer_start(s->loop, s->timeout_watcher);
                     ev_io_start(s->loop, s->write_watcher);
                     s->state = PST_SENDWAIT;
                     ev_invoke(s->loop, s->write_watcher, EV_WRITE); // predictive, EAGAIN if not
                 }
                 else {
-                    ev_timer_set(s->timeout_watcher, SECS_CONN_IDLE, 0.);
+                    ev_timer_set(s->timeout_watcher, s->idle_timeout, 0.);
                     ev_timer_start(s->loop, s->timeout_watcher);
                     s->state = PST_CONN_IDLE;
                 }
@@ -636,7 +636,9 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
             shutdown(s->fd, SHUT_RDWR);
             close(s->fd);
             s->fd = -1;
-            ev_timer_set(s->timeout_watcher, SECS_CONN_WAIT, 0.);
+            if(s->conn_wait_timeout < CONN_WAIT_MAX)
+                s->conn_wait_timeout <<= 1;
+            ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
             ev_timer_start(s->loop, s->timeout_watcher);
             break;
         case PST_SENDWAIT:
@@ -667,7 +669,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     }
 }
 
-purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* queue, unsigned vhead, bool purge_full_url) {
+purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* queue, unsigned vhead, bool purge_full_url, unsigned io_timeout, unsigned idle_timeout) {
     purger_t* s = calloc(1, sizeof(purger_t));
     s->fd = -1;
     s->purge_full_url = purge_full_url;
@@ -677,6 +679,9 @@ purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* qu
     s->queue = queue;
     s->vhead = vhead;
     s->loop = loop;
+    s->io_timeout = io_timeout;
+    s->idle_timeout = idle_timeout;
+    s->conn_wait_timeout = CONN_WAIT_INIT;
 
     memcpy(&s->daddr, daddr, sizeof(dmn_anysin_t));
 
@@ -719,7 +724,7 @@ void purger_ping(purger_t* s) {
             if(!dequeue_to_outbuf(s)) {
                 ev_io_start(s->loop, s->write_watcher);
                 ev_timer_stop(s->loop, s->timeout_watcher);
-                ev_timer_set(s->timeout_watcher, SECS_CONN_IO, 0.);
+                ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
                 ev_timer_start(s->loop, s->timeout_watcher);
                 s->state = PST_SENDWAIT;
             }

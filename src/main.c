@@ -46,10 +46,12 @@ static const char def_ifaddr[] = "0.0.0.0:4827";
 #define DEF_Q_MB 256U
 #define DEF_MCAST_PORT 4827U
 #define DEF_STATS_FILE "/tmp/" PACKAGE_NAME ".stats"
+#define DEF_IO_TIMEOUT 7U
+#define DEF_IDLE_TIMEOUT 23U
 
 static void usage(const char* argv0) {
     fprintf(stderr, "Usage:\n"
-        "%s [-d] [-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u ] [-s %s ] -m mcast_addr -c cache_addr_port <action>\n"
+        "%s [-d] [-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u] [-s %s] [-t %u] [-T %u] -m mcast_addr -c cache_addr_port <action>\n"
         "  -d -- Extra debug logging\n"
         "  -F -- Use full absolute URL in PURGE request\n"
         "  -u -- Username for privilege drop\n"
@@ -58,6 +60,8 @@ static void usage(const char* argv0) {
         "  -r -- Regex filter for valid purge hostnames (POSIX Extended, default unfiltered)\n"
         "  -l -- Queue limit in MB\n"
         "  -s -- Stats output filename\n"
+        "  -t -- I/O timeout for purgers\n"
+        "  -T -- Idle connection timeout for purgers\n"
         "  -m -- Multicast address (required, multiple allowed)\n"
         "  -c -- Cache IP:Port (required, multiple allowed)\n"
         "<action> is one of:\n"
@@ -70,7 +74,8 @@ static void usage(const char* argv0) {
         "  condrestart - Does 'restart' action only if already running\n"
         "  try-restart - Aliases 'condrestart'\n"
         "  status - Checks the status of the running daemon\n\n",
-    argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_Q_MB, DEF_STATS_FILE, DEF_MCAST_PORT);
+    argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_Q_MB, DEF_STATS_FILE, DEF_MCAST_PORT,
+    DEF_IO_TIMEOUT, DEF_IDLE_TIMEOUT);
     exit(99);
 }
 
@@ -119,6 +124,8 @@ typedef struct {
     int lsock;
     unsigned max_queue_mb;
     unsigned num_purgers;
+    unsigned io_timeout;
+    unsigned idle_timeout;
     char* username;
     char* pidfile;
     char* statsfile;
@@ -138,7 +145,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     // Basic cmdline parse
     int optch;
-    while((optch = getopt(argc, argv, "dFu:p:a:r:l:m:c:")) != -1) {
+    while((optch = getopt(argc, argv, "dFt:T:u:p:a:r:l:m:c:")) != -1) {
         switch(optch) {
             case 'd':
                 cfg->debug = true;
@@ -163,6 +170,12 @@ static cfg_t* handle_args(int argc, char* argv[]) {
                 break;
             case 'l':
                 cfg->max_queue_mb = (unsigned)atoi(optarg);
+                break;
+            case 't':
+                cfg->io_timeout = (unsigned)atoi(optarg);
+                break;
+            case 'T':
+                cfg->idle_timeout = (unsigned)atoi(optarg);
                 break;
             case 'm':
                 num_mcs++;
@@ -190,6 +203,10 @@ static cfg_t* handle_args(int argc, char* argv[]) {
         cfg->max_queue_mb = DEF_Q_MB;
     if(!cfg->statsfile)
         cfg->statsfile = strdup(DEF_STATS_FILE);
+    if(!cfg->io_timeout)
+        cfg->io_timeout = DEF_IO_TIMEOUT;
+    if(!cfg->idle_timeout)
+        cfg->idle_timeout = DEF_IDLE_TIMEOUT;
 
     // require final non-option for action
     if(optind != (argc - 1)) {
@@ -376,7 +393,7 @@ int main(int argc, char* argv[]) {
     // set up an array of purger objects
     purgers = malloc(num_purgers * sizeof(purger_t*));
     for(unsigned i = 0; i < cfg->num_purgers; i++)
-        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], queue, i, cfg->purge_full_url);
+        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], queue, i, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
 
     // set up the singular receiver
     receiver_t* receiver = receiver_new(
