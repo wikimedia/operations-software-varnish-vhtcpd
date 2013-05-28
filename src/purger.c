@@ -710,26 +710,24 @@ void purger_ping(purger_t* s) {
     dmn_log_debug("purger: %s/%s -> hit purger_ping()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
     purger_assert_sanity(s);
 
-    // ping is called immediately after an enqueue...
+    // ping is called immediately after an enqueue, thus dequeue
+    //   always has an item to fetch
     dmn_assert(!strq_is_empty(s->queue, s->vhead));
 
     // enqueue can happen in any state, but actions differ:
     switch(s->state) {
-        // when in either idle state, the queue is empty and the outbuf
-        //   is empty, so encode directly to the outbuf and start up
-        //   I/O action...
+        // when in either idle state, dequeue and take action immediately
         case PST_NOTCONN_IDLE:
-            if(!dequeue_to_outbuf(s))
-                purger_connect(s); // state transition is conditional within
+            dequeue_to_outbuf(s);
+            purger_connect(s); // state transition is conditional within
             break;
         case PST_CONN_IDLE:
-            if(!dequeue_to_outbuf(s)) {
-                ev_io_start(s->loop, s->write_watcher);
-                ev_timer_stop(s->loop, s->timeout_watcher);
-                ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
-                ev_timer_start(s->loop, s->timeout_watcher);
-                s->state = PST_SENDWAIT;
-            }
+            dequeue_to_outbuf(s);
+            ev_io_start(s->loop, s->write_watcher);
+            ev_timer_stop(s->loop, s->timeout_watcher);
+            ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
+            ev_timer_start(s->loop, s->timeout_watcher);
+            s->state = PST_SENDWAIT;
             break;
 
         // When in non-idle states, there's nothing to do here.
