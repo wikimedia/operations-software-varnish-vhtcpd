@@ -182,8 +182,8 @@ const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead) {
             else {
                 q->str_head += qe->len;
             }
-            assert_queue_sane(q);
         }
+        assert_queue_sane(q);
     }
     return rv;
 }
@@ -265,6 +265,7 @@ static void wipe_queue(strq_t* q) {
     q->q_size = q->q_head = q->q_tail = 0;
     q->str_head = q->str_tail = 0;
     memset(q->vheads, 0, q->num_vheads * sizeof(unsigned));
+    assert_queue_sane(q);
 }
 
 void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
@@ -293,9 +294,11 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
         q->queue = realloc(q->queue, q->q_alloc * sizeof(qentry_t));
         // then, move the wrapped tail end to the physical end of
         //   the original allocation
-        dmn_assert(q->q_tail < old_alloc); // memcpy doesn't overlap
-        memcpy(&q->queue[old_alloc], q->queue, q->q_tail * sizeof(qentry_t));
-        q->q_tail += old_alloc;
+        if(q->q_head) {
+            dmn_assert(q->q_tail < old_alloc); // memcpy doesn't overlap
+            memcpy(&q->queue[old_alloc], q->queue, q->q_tail * sizeof(qentry_t));
+            q->q_tail += old_alloc;
+        }
         dmn_assert(q->q_tail < q->q_alloc); // new tail within new storage
         // handle vhead moves if they were memcpy'd from the wrapped area
         for(unsigned i = 0; i < q->num_vheads; i++)
