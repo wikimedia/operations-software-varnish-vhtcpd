@@ -5,7 +5,7 @@ ACLOCAL_AMFLAGS = -I m4
 # Subdirectories to recurse into
 SUBDIRS = src
 
-EXTRA_DIST = t/pktgen.pl
+EXTRA_DIST = NEWS t/pktgen.pl
 
 # Some junk autotools doesn't seem to clean on its own
 DISTCLEANFILES = config.h.in~ configure.ac~

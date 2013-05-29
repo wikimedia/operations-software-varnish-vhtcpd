@@ -46,13 +46,19 @@ static const char def_ifaddr[] = "0.0.0.0:4827";
 #define DEF_Q_MB 256U
 #define DEF_MCAST_PORT 4827U
 #define DEF_STATS_FILE "/tmp/" PACKAGE_NAME ".stats"
-#define DEF_IO_TIMEOUT 7U
+#define DEF_IO_TIMEOUT 57U
 #define DEF_IDLE_TIMEOUT 23U
 
 static void usage(const char* argv0) {
-    fprintf(stderr, "Usage:\n"
-        "%s [-d] [-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u] [-s %s] [-t %u] [-T %u] -m mcast_addr -c cache_addr_port <action>\n"
-        "  -d -- Extra debug logging\n"
+    fprintf(stderr, PACKAGE_NAME " " PACKAGE_VERSION "\nUsage:\n"
+        "%s "
+#ifndef NDEBUG
+        "[-d] "
+#endif
+        "[-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u] [-s %s] [-t %u] [-T %u] -m mcast_addr -c cache_addr_port <action>\n"
+#ifndef NDEBUG
+        "  -d -- Extra debug logging for developer build\n"
+#endif
         "  -F -- Use full absolute URL in PURGE request\n"
         "  -u -- Username for privilege drop\n"
         "  -p -- Pidfile pathname\n"
@@ -74,8 +80,8 @@ static void usage(const char* argv0) {
         "  condrestart - Does 'restart' action only if already running\n"
         "  try-restart - Aliases 'condrestart'\n"
         "  status - Checks the status of the running daemon\n\n",
-    argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_Q_MB, DEF_STATS_FILE, DEF_MCAST_PORT,
-    DEF_IO_TIMEOUT, DEF_IDLE_TIMEOUT);
+    argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_Q_MB, DEF_STATS_FILE,
+    DEF_IO_TIMEOUT, DEF_IDLE_TIMEOUT, DEF_MCAST_PORT);
     exit(99);
 }
 
