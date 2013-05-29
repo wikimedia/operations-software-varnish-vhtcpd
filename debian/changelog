@@ -1,3 +1,9 @@
+vhtcpd (0.0.5-1) unstable; urgency=low
+
+  * bump "upstream" for fixes
+
+ -- Brandon Black <bblack@wikimedia.org>  Wed, 29 May 2013 13:13:37 +0000
+
 vhtcpd (0.0.4-1) unstable; urgency=low
 
   * bump "upstream" for fixes

@@ -20,3 +20,4 @@ Architecture: any
 Depends: vhtcpd (= ${binary:Version}), ${misc:Depends}
 Section: debug
 Description: HTCP-to-PURGE forwader for Varnish (debug symbols)
+ Debug symbols for vhtcpd
