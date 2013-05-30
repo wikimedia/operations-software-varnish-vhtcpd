@@ -1,4 +1,11 @@
 
+0.0.6 - 2013-05-30
+  Now allows text hostnames in cache cmdline args
+  Upgraded hostname regex matches from POSIX ERE to PCRE
+  Fixed a couple of minor memory management bugs that
+    happened to not be causing any real problems, at
+    least in the build environment being tested.
+
 0.0.5 - 2013-05-29
   First seemingly production-ready release, will track
    significant changes in this file from here out.
