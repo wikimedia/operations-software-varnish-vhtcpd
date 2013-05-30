@@ -172,7 +172,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
                 match_str = optarg;
                 break;
             case 's':
-                cfg->statsfile = optarg;
+                cfg->statsfile = strdup(optarg);
                 break;
             case 'l':
                 cfg->max_queue_mb = (unsigned)atoi(optarg);
@@ -350,11 +350,11 @@ static void cfg_destroy(cfg_t* cfg) {
     free(cfg->pidfile);
     free(cfg->matcher);
     free(cfg->purger_addrs);
+    free(cfg->statsfile);
     free(cfg);
 }
 
 static purger_t** purgers = NULL;
-static unsigned num_purgers = 0;
 
 static void syserr_for_ev(const char* msg) { dmn_assert(msg); dmn_log_fatal("%s: %s", msg, dmn_logf_errno()); }
 
@@ -397,7 +397,7 @@ int main(int argc, char* argv[]) {
     strq_t* queue = strq_new(loop, cfg->max_queue_mb, cfg->num_purgers);
 
     // set up an array of purger objects
-    purgers = malloc(num_purgers * sizeof(purger_t*));
+    purgers = malloc(cfg->num_purgers * sizeof(purger_t*));
     for(unsigned i = 0; i < cfg->num_purgers; i++)
         purgers[i] = purger_new(loop, &cfg->purger_addrs[i], queue, i, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
 
