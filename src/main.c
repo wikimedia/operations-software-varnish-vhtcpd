@@ -23,7 +23,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
-#include <regex.h>
+#include <pcre.h>
 #include <ev.h>
 #include "purger.h"
 #include "receiver.h"
@@ -63,13 +63,13 @@ static void usage(const char* argv0) {
         "  -u -- Username for privilege drop\n"
         "  -p -- Pidfile pathname\n"
         "  -a -- Multicast local listen IP[:Port] (port defaults to %u)\n"
-        "  -r -- Regex filter for valid purge hostnames (POSIX Extended, default unfiltered)\n"
+        "  -r -- Regex filter for valid purge hostnames (PCRE case-insensitive, default unfiltered)\n"
         "  -l -- Queue limit in MB\n"
         "  -s -- Stats output filename\n"
         "  -t -- I/O timeout for purgers\n"
         "  -T -- Idle connection timeout for purgers\n"
         "  -m -- Multicast address (required, multiple allowed)\n"
-        "  -c -- Cache IP:Port (required, multiple allowed)\n"
+        "  -c -- Cache IP:Port or Hostname:Port (required, multiple allowed)\n"
         "<action> is one of:\n"
         "  startfg - Start " PACKAGE_NAME " in foreground w/ logs to stderr\n"
         "  start - Start " PACKAGE_NAME " as a regular daemon\n"
@@ -135,7 +135,8 @@ typedef struct {
     char* username;
     char* pidfile;
     char* statsfile;
-    regex_t* matcher;
+    pcre* matcher;
+    pcre_extra* matcher_extra;
     dmn_anysin_t* purger_addrs;
 } cfg_t;
 
@@ -172,7 +173,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
                 match_str = optarg;
                 break;
             case 's':
-                cfg->statsfile = optarg;
+                cfg->statsfile = strdup(optarg);
                 break;
             case 'l':
                 cfg->max_queue_mb = (unsigned)atoi(optarg);
@@ -294,9 +295,14 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     // construct regex
     if(match_str) {
-       cfg->matcher = malloc(sizeof(regex_t));
-       if(regcomp(cfg->matcher, match_str, REG_EXTENDED | REG_ICASE | REG_NOSUB))
-           dmn_log_fatal("Cannot compile regex '%s': %s", match_str, dmn_strerror(errno));
+        const char* pcre_err = NULL;
+        int pcre_err_offs = 0;
+        cfg->matcher = pcre_compile(match_str, PCRE_CASELESS, &pcre_err, &pcre_err_offs, 0);
+        if(!cfg->matcher)
+            dmn_log_fatal("PCRE regex compilation error! %s at offset %d in >>> %s <<<", pcre_err, pcre_err_offs, match_str);
+        cfg->matcher_extra = pcre_study(cfg->matcher, 0, &pcre_err);
+        if(!cfg->matcher_extra && pcre_err) 
+            dmn_log_fatal("Study of compiled regex '%s' failed: %s", match_str, pcre_err);
     }
 
     // Parse input IP/port strings...
@@ -325,7 +331,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
     cfg->num_purgers = num_purgers;
     cfg->purger_addrs = calloc(num_purgers, sizeof(dmn_anysin_t));
     for(unsigned i = 0; i < num_purgers; i++) {
-        addr_err = dmn_anysin_fromstr(purger_addrs[i], 0, &cfg->purger_addrs[i], true);
+        addr_err = dmn_anysin_fromstr(purger_addrs[i], 0, &cfg->purger_addrs[i], false);
         if(addr_err)
             dmn_log_fatal("Invalid cache address:port '%s': %s", purger_addrs[i], gai_strerror(addr_err));
     }
@@ -348,13 +354,14 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 static void cfg_destroy(cfg_t* cfg) {
     free(cfg->username);
     free(cfg->pidfile);
-    free(cfg->matcher);
+    pcre_free(cfg->matcher_extra);
+    pcre_free(cfg->matcher);
     free(cfg->purger_addrs);
+    free(cfg->statsfile);
     free(cfg);
 }
 
 static purger_t** purgers = NULL;
-static unsigned num_purgers = 0;
 
 static void syserr_for_ev(const char* msg) { dmn_assert(msg); dmn_log_fatal("%s: %s", msg, dmn_logf_errno()); }
 
@@ -397,7 +404,7 @@ int main(int argc, char* argv[]) {
     strq_t* queue = strq_new(loop, cfg->max_queue_mb, cfg->num_purgers);
 
     // set up an array of purger objects
-    purgers = malloc(num_purgers * sizeof(purger_t*));
+    purgers = malloc(cfg->num_purgers * sizeof(purger_t*));
     for(unsigned i = 0; i < cfg->num_purgers; i++)
         purgers[i] = purger_new(loop, &cfg->purger_addrs[i], queue, i, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
 
@@ -405,6 +412,7 @@ int main(int argc, char* argv[]) {
     receiver_t* receiver = receiver_new(
         loop,
         cfg->matcher,
+        cfg->matcher_extra,
         queue,
         purgers,
         cfg->num_purgers,

@@ -24,7 +24,6 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
-#include <regex.h>
 #include <errno.h>
 #include <netdb.h>
 #include <sys/socket.h>
@@ -69,7 +68,8 @@ struct receiver {
     ev_io* read_watcher;
     strq_t* queue;
     purger_t** purgers;
-    const regex_t* matcher;
+    const pcre* matcher;
+    const pcre_extra* matcher_extra;
 };
 
 // GCC-ish unaligned access for 16-bit numbers
@@ -174,15 +174,16 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         if(r->matcher) {
             struct http_parser_url up;
             memset(&up, 0, sizeof(struct http_parser_url));
-            if(!http_parser_parse_url(url, url_len, 0, &up)
-                && (up.field_set & (1 << UF_HOST))) {
-                    // copy to stack because regexec() needs NUL terminator
-                    const unsigned hn_len = up.field_data[UF_HOST].len;
-                    char hn_temp[hn_len + 1];
-                    memcpy(hn_temp, &url[up.field_data[UF_HOST].off], hn_len);
-                    hn_temp[hn_len] = '\0';
-                    if(regexec(r->matcher, hn_temp, 0, NULL, 0))
-                        continue; // match failed
+            if(http_parser_parse_url(url, url_len, 0, &up) || !(up.field_set & (1 << UF_HOST))) {
+                dmn_log_err("Failed to parse hostname from URL '%s', rejecting", url);
+                continue;
+            }
+            int pcre_rv = pcre_exec(r->matcher, r->matcher_extra,
+                &url[up.field_data[UF_HOST].off], up.field_data[UF_HOST].len, 0, 0, NULL, 0);
+            if(pcre_rv < 0) { // match failed, or an error occured
+                if(pcre_rv != PCRE_ERROR_NOMATCH)
+                    dmn_log_err("Error executing regex matcher: PCRE error code: %d", pcre_rv);
+                continue;
             }
         }
 
@@ -202,13 +203,14 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     dmn_log_debug("receiver: done recv()ing, enqueued: %u", MAX_TIGHT_QUEUE - queued_ctr);
 }
 
-receiver_t* receiver_new(struct ev_loop* loop, const regex_t* matcher, strq_t* queue, purger_t** purgers, unsigned num_purgers, int lsock) {
+receiver_t* receiver_new(struct ev_loop* loop, const pcre* matcher, const pcre_extra* matcher_extra, strq_t* queue, purger_t** purgers, unsigned num_purgers, int lsock) {
     dmn_assert(loop); dmn_assert(queue); dmn_assert(purgers); dmn_assert(num_purgers);
 
     receiver_t* r = malloc(sizeof(receiver_t));
     r->inbuf = malloc(INBUF_SIZE);
     r->read_watcher = malloc(sizeof(ev_io));
     r->matcher = matcher;
+    r->matcher_extra = matcher_extra;
     r->loop = loop;
     r->queue = queue;
     r->purgers = purgers;
