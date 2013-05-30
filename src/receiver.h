@@ -3,7 +3,7 @@
 #define VHTCPD_RECEIVER_H
 
 #include <sys/types.h>
-#include <regex.h>
+#include <pcre.h>
 #include <ev.h>
 #include "libdmn/dmn.h"
 #include "strq.h"
@@ -20,7 +20,8 @@ int receiver_create_lsock(const dmn_anysin_t* iface, const dmn_anysin_t* mcasts,
 // However, they must be valid for the life of the receiver.
 receiver_t* receiver_new(
     struct ev_loop* loop,
-    const regex_t* matcher,
+    const pcre* matcher,
+    const pcre_extra* matcher_extra,
     strq_t* queue,
     purger_t** purgers,
     unsigned num_purgers,

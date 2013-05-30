@@ -23,7 +23,7 @@
 #include <unistd.h>
 #include <string.h>
 #include <sys/types.h>
-#include <regex.h>
+#include <pcre.h>
 #include <ev.h>
 #include "purger.h"
 #include "receiver.h"
@@ -63,7 +63,7 @@ static void usage(const char* argv0) {
         "  -u -- Username for privilege drop\n"
         "  -p -- Pidfile pathname\n"
         "  -a -- Multicast local listen IP[:Port] (port defaults to %u)\n"
-        "  -r -- Regex filter for valid purge hostnames (POSIX Extended, default unfiltered)\n"
+        "  -r -- Regex filter for valid purge hostnames (PCRE case-insensitive, default unfiltered)\n"
         "  -l -- Queue limit in MB\n"
         "  -s -- Stats output filename\n"
         "  -t -- I/O timeout for purgers\n"
@@ -135,7 +135,8 @@ typedef struct {
     char* username;
     char* pidfile;
     char* statsfile;
-    regex_t* matcher;
+    pcre* matcher;
+    pcre_extra* matcher_extra;
     dmn_anysin_t* purger_addrs;
 } cfg_t;
 
@@ -294,9 +295,14 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     // construct regex
     if(match_str) {
-       cfg->matcher = malloc(sizeof(regex_t));
-       if(regcomp(cfg->matcher, match_str, REG_EXTENDED | REG_ICASE | REG_NOSUB))
-           dmn_log_fatal("Cannot compile regex '%s': %s", match_str, dmn_strerror(errno));
+        const char* pcre_err = NULL;
+        int pcre_err_offs = 0;
+        cfg->matcher = pcre_compile(match_str, PCRE_CASELESS, &pcre_err, &pcre_err_offs, 0);
+        if(!cfg->matcher)
+            dmn_log_fatal("PCRE regex compilation error! %s at offset %d in >>> %s <<<", pcre_err, pcre_err_offs, match_str);
+        cfg->matcher_extra = pcre_study(cfg->matcher, 0, &pcre_err);
+        if(!cfg->matcher_extra && pcre_err) 
+            dmn_log_fatal("Study of compiled regex '%s' failed: %s", match_str, pcre_err);
     }
 
     // Parse input IP/port strings...
@@ -348,7 +354,8 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 static void cfg_destroy(cfg_t* cfg) {
     free(cfg->username);
     free(cfg->pidfile);
-    free(cfg->matcher);
+    pcre_free(cfg->matcher_extra);
+    pcre_free(cfg->matcher);
     free(cfg->purger_addrs);
     free(cfg->statsfile);
     free(cfg);
@@ -405,6 +412,7 @@ int main(int argc, char* argv[]) {
     receiver_t* receiver = receiver_new(
         loop,
         cfg->matcher,
+        cfg->matcher_extra,
         queue,
         purgers,
         cfg->num_purgers,

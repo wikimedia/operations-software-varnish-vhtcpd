@@ -7,7 +7,7 @@ LIBDMN_SRC = libdmn/dmn_daemon.c libdmn/dmn_log.c libdmn/dmn_secure.c libdmn/dmn
 # How to build gdnsd
 sbin_PROGRAMS = vhtcpd
 vhtcpd_SOURCES = main.c strq.c strq.h receiver.c receiver.h purger.c purger.h stats.c stats.h http-parser/http_parser.c http-parser/http_parser.h $(LIBDMN_SRC)
-vhtcpd_LDADD = -lev
+vhtcpd_LDADD = -lev -lpcre
 
 TESTS = test_strq
 check_PROGRAMS = test_strq
