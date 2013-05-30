@@ -69,7 +69,7 @@ static void usage(const char* argv0) {
         "  -t -- I/O timeout for purgers\n"
         "  -T -- Idle connection timeout for purgers\n"
         "  -m -- Multicast address (required, multiple allowed)\n"
-        "  -c -- Cache IP:Port (required, multiple allowed)\n"
+        "  -c -- Cache IP:Port or Hostname:Port (required, multiple allowed)\n"
         "<action> is one of:\n"
         "  startfg - Start " PACKAGE_NAME " in foreground w/ logs to stderr\n"
         "  start - Start " PACKAGE_NAME " as a regular daemon\n"
@@ -325,7 +325,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
     cfg->num_purgers = num_purgers;
     cfg->purger_addrs = calloc(num_purgers, sizeof(dmn_anysin_t));
     for(unsigned i = 0; i < num_purgers; i++) {
-        addr_err = dmn_anysin_fromstr(purger_addrs[i], 0, &cfg->purger_addrs[i], true);
+        addr_err = dmn_anysin_fromstr(purger_addrs[i], 0, &cfg->purger_addrs[i], false);
         if(addr_err)
             dmn_log_fatal("Invalid cache address:port '%s': %s", purger_addrs[i], gai_strerror(addr_err));
     }
