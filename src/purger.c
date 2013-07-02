@@ -44,8 +44,8 @@
 // this buffer holds a fully-formed HTTP request to purge a single URL.
 #define OUTBUF_SIZE 4096U
 
-// this buffer holds the complete HTTP response we get
-#define INBUF_SIZE 4096U
+// this buffer holds the complete HTTP response we get, and can grow at runtime
+#define INBUF_INITSIZE 4096U
 
 // initial and maximum wait betwen connect() attempts when connects are failing
 //  and/or timing out.  The wait doubles after every failure (but limited to the
@@ -136,7 +136,8 @@ struct purger {
     int fd;
     unsigned outbuf_bytes;   // total size of current buffered message
     unsigned outbuf_written; // bytes of the message sent so far...
-    unsigned inbuf_parsed;
+    unsigned inbuf_size;     // dynamic resize of inbuf
+    unsigned inbuf_parsed;   // consumed by parser so far
     unsigned io_timeout;     // these two are fixed via config
     unsigned idle_timeout;   // these two are fixed via config
     unsigned conn_wait_timeout; // dynamic, rises until success...
@@ -189,6 +190,8 @@ http_parser_settings psettings = {
 static void purger_assert_sanity(purger_t* s) {
     dmn_assert(s);
     dmn_assert(s->outbuf);
+    dmn_assert(s->inbuf);
+    dmn_assert(s->inbuf_size);
     dmn_assert(s->queue);
     dmn_assert(s->loop);
     dmn_assert(s->write_watcher);
@@ -514,7 +517,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     purger_assert_sanity(s);
     dmn_log_debug("purger: %s/%s -> hit purger_read_cb()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
 
-    const unsigned to_recv = INBUF_SIZE - s->inbuf_parsed;
+    const unsigned to_recv = s->inbuf_size - s->inbuf_parsed;
     int recvrv = recv(s->fd, &s->inbuf[s->inbuf_parsed], to_recv, 0);
     if(recvrv < 1) {
         if(recvrv == -1) {
@@ -553,11 +556,14 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     }
 
     if(recvrv == (int)to_recv) {
-        dmn_log_err("TCP conn to %s: response too large, dropping request", dmn_logf_anysin(&s->daddr));
-        close_from_read_cb(s, true);
-        return;
+        // TCP might want to give us more data than the buffer can hold, expand it the buffer
+        //  and feed what we have to the parser.  It's exceedingly likely the parse won't yet
+        //  complete and we'll get another recv callback to finish up.
+        s->inbuf_size <<= 1;
+        s->inbuf = realloc(s->inbuf, s->inbuf_size);
+        dmn_log_err("TCP recv buffer for %s grew to %u", dmn_logf_anysin(&s->daddr), s->inbuf_size);
     }
-    else { // reasonably-sized data, attempt parse
+
         if(!s->inbuf_parsed) // first read
             http_parser_init(s->parser, HTTP_RESPONSE);
 
@@ -610,7 +616,6 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             //  so just return to the loop and maintain this state to get more data.
             dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse, still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
         }
-    }
 }
 
 static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
@@ -673,8 +678,9 @@ purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* qu
     purger_t* s = calloc(1, sizeof(purger_t));
     s->fd = -1;
     s->purge_full_url = purge_full_url;
+    s->inbuf_size = INBUF_INITSIZE;
     s->outbuf = malloc(OUTBUF_SIZE);
-    s->inbuf = malloc(INBUF_SIZE);
+    s->inbuf = malloc(s->inbuf_size);
     s->parser = malloc(sizeof(http_parser));
     s->queue = queue;
     s->vhead = vhead;
