@@ -1,4 +1,10 @@
 
+0.0.8 - 2013-07-02
+  Fixed HTTP response parsing bug that caused queue backlog
+    and constant re-send of a certain queue item.
+  Added an "inpkts_dequeued" stat, which advances when
+    all purgers have dequeued a given request.
+
 0.0.7 - 2013-07-02
   Handles large HTTP response bodies more gracefully
   Small socket tweak for ephemeral port allocation, maybe

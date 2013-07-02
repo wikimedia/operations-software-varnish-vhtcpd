@@ -169,6 +169,7 @@ const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead) {
         q->vheads[vhead] &= (q->q_alloc - 1U); // mod po2 to wrap
 
         if(advance_head) {
+            stats.inpkts_dequeued++;
             q->q_head++;
             q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
             q->q_size--;
