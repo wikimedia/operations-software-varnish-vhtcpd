@@ -1,4 +1,8 @@
 
+0.0.7 - 2013-07-02
+  Handles large HTTP response bodies more gracefully
+  Small socket tweak for ephemeral port allocation, maybe
+
 0.0.6 - 2013-05-30
   Now allows text hostnames in cache cmdline args
   Upgraded hostname regex matches from POSIX ERE to PCRE
