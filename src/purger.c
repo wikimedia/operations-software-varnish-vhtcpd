@@ -356,6 +356,12 @@ static void purger_connect(purger_t* s) {
     if(fcntl(s->fd, F_SETFL, (fcntl(s->fd, F_GETFL, 0)) | O_NONBLOCK) == -1)
         dmn_log_fatal("Failed to set O_NONBLOCK on TCP socket: %s", dmn_logf_errno());
 
+    // Atypical with no intent to bind(), but may help with racing other threads for
+    //  ephemeral port allocation in Linux leading to random socket errors, supposedly?
+    int opt_one = 1;
+    if(setsockopt(s->fd, SOL_SOCKET, SO_REUSEADDR, &opt_one, sizeof(int)))
+        dmn_log_warn("Failed to set SO_REUSEADDR on TCP socket: %s", dmn_logf_errno());
+
     // Initiate a connect() attempt.  In theory this always returns -1/EINPROGRESS for
     //   a nonblocking socket, but it's possible it succeeds immediately for localhost...
     if(connect(s->fd, &s->daddr.sa, s->daddr.len) == -1) {
