@@ -9,6 +9,7 @@ typedef struct {
     uint64_t inpkts_recvd;
     uint64_t inpkts_sane;
     uint64_t inpkts_enqueued;
+    uint64_t inpkts_dequeued;
     uint64_t queue_overflows;
 } stats_t;
 
