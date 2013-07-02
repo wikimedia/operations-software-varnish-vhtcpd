@@ -564,58 +564,58 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         dmn_log_err("TCP recv buffer for %s grew to %u", dmn_logf_anysin(&s->daddr), s->inbuf_size);
     }
 
-        if(!s->inbuf_parsed) // first read
-            http_parser_init(s->parser, HTTP_RESPONSE);
+    if(!s->inbuf_parsed) // first read
+        http_parser_init(s->parser, HTTP_RESPONSE);
 
-        parse_res_t pr = { false, false, false };
-        s->parser->data = &pr;
-        int hpe_parsed = http_parser_execute(s->parser, &psettings, &s->inbuf[s->inbuf_parsed], recvrv);
-        s->inbuf_parsed += hpe_parsed;
-        if(hpe_parsed != recvrv) { // not parseable, could be more trailing garbage, close it all down
-            dmn_log_err("TCP conn to %s: response unparseable, dropping request", dmn_logf_anysin(&s->daddr));
-            close_from_read_cb(s, true);
-            return;
+    parse_res_t pr = { false, false, false };
+    s->parser->data = &pr;
+    int hpe_parsed = http_parser_execute(s->parser, &psettings, &s->inbuf[s->inbuf_parsed], recvrv);
+    s->inbuf_parsed += hpe_parsed;
+    if(hpe_parsed != recvrv) { // not parseable, could be more trailing garbage, close it all down
+        dmn_log_err("TCP conn to %s: response unparseable, dropping request", dmn_logf_anysin(&s->daddr));
+        close_from_read_cb(s, true);
+        return;
+    }
+    else if(pr.cb_called) { // parsed a full response
+        // XXX pr.status_ok will just be for stats?
+        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+
+        // reset i/o progress
+        s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
+
+        // no matter which path, current timer needs to go
+        ev_timer_stop(s->loop, s->timeout_watcher);
+
+        if(pr.need_to_close) {
+            shutdown(s->fd, SHUT_RDWR);
+            close(s->fd);
+            s->fd = -1;
+            ev_io_stop(s->loop, s->read_watcher);
+            if(!dequeue_to_outbuf(s))
+                purger_connect(s);
+            else
+                s->state = PST_NOTCONN_IDLE;
         }
-        else if(pr.cb_called) { // parsed a full response
-            // XXX pr.status_ok will just be for stats?
-            dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-
-            // reset i/o progress
-            s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
-
-            // no matter which path, current timer needs to go
-            ev_timer_stop(s->loop, s->timeout_watcher);
-
-            if(pr.need_to_close) {
-                shutdown(s->fd, SHUT_RDWR);
-                close(s->fd);
-                s->fd = -1;
-                ev_io_stop(s->loop, s->read_watcher);
-                if(!dequeue_to_outbuf(s))
-                    purger_connect(s);
-                else
-                    s->state = PST_NOTCONN_IDLE;
+        else { // maintain connection
+            if(!dequeue_to_outbuf(s)) {
+                ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
+                ev_timer_start(s->loop, s->timeout_watcher);
+                ev_io_start(s->loop, s->write_watcher);
+                s->state = PST_SENDWAIT;
+                ev_invoke(s->loop, s->write_watcher, EV_WRITE); // predictive, EAGAIN if not
             }
-            else { // maintain connection
-                if(!dequeue_to_outbuf(s)) {
-                    ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
-                    ev_timer_start(s->loop, s->timeout_watcher);
-                    ev_io_start(s->loop, s->write_watcher);
-                    s->state = PST_SENDWAIT;
-                    ev_invoke(s->loop, s->write_watcher, EV_WRITE); // predictive, EAGAIN if not
-                }
-                else {
-                    ev_timer_set(s->timeout_watcher, s->idle_timeout, 0.);
-                    ev_timer_start(s->loop, s->timeout_watcher);
-                    s->state = PST_CONN_IDLE;
-                }
+            else {
+                ev_timer_set(s->timeout_watcher, s->idle_timeout, 0.);
+                ev_timer_start(s->loop, s->timeout_watcher);
+                s->state = PST_CONN_IDLE;
             }
         }
-        else {
-            // If neither of the above, parser consumed all available data and didn't complete the message,
-            //  so just return to the loop and maintain this state to get more data.
-            dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse, still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-        }
+    }
+    else {
+        // If neither of the above, parser consumed all available data and didn't complete the message,
+        //  so just return to the loop and maintain this state to get more data.
+        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse, still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+    }
 }
 
 static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
