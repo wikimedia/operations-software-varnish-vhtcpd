@@ -525,30 +525,24 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
 
     const unsigned to_recv = s->inbuf_size - s->inbuf_parsed;
     int recvrv = recv(s->fd, &s->inbuf[s->inbuf_parsed], to_recv, 0);
-    if(recvrv < 1) {
-        if(recvrv == -1) {
-            switch(errno) {
-                case EAGAIN:
-                case EINTR:
-                    // no real problem, but must return to eventloop and wait more
-                    dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: EAGAIN/EINTR", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-                    return;
-                case ENOTCONN:
-                case ECONNRESET:
-                case ETIMEDOUT:
-                case EPIPE:
-                    // "normal" problems, no need to log about it
-                    dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: closing due to '%s'", dmn_logf_anysin(&s->daddr), state_strs[s->state], dmn_logf_errno());
-                    break;
-                default:
-                    // abormal problems, mention it in the log
-                    dmn_log_err("TCP conn to %s failed while reading: %s", dmn_logf_anysin(&s->daddr), dmn_logf_errno());
-            }
+    if(recvrv < 0) {
+        switch(errno) {
+            case EAGAIN:
+            case EINTR:
+                // no real problem, but must return to eventloop and wait more
+                dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: EAGAIN/EINTR", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+                return;
+            case ENOTCONN:
+            case ECONNRESET:
+            case ETIMEDOUT:
+            case EPIPE:
+                // "normal" problems, no need to log about it
+                dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: closing due to '%s'", dmn_logf_anysin(&s->daddr), state_strs[s->state], dmn_logf_errno());
+                break;
+            default:
+                // abormal problems, mention it in the log
+                dmn_log_err("TCP conn to %s failed while reading: %s", dmn_logf_anysin(&s->daddr), dmn_logf_errno());
         }
-
-        if(recvrv == 0)
-            dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: server closed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-
         close_from_read_cb(s, false);
         return;
     }
@@ -556,7 +550,10 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     // From here we actually got some data...
 
     if(s->state != PST_RECVWAIT) {
-        dmn_log_err("TCP conn to %s: received unexpected data from server during request-send or idle phases...", dmn_logf_anysin(&s->daddr));
+        if(recvrv == 0)
+            dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: server closed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+        else
+            dmn_log_err("TCP conn to %s: received unexpected data from server during request-send or idle phases...", dmn_logf_anysin(&s->daddr));
         close_from_read_cb(s, false);
         return;
     }
@@ -620,7 +617,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     else {
         // If neither of the above, parser consumed all available data and didn't complete the message,
         //  so just return to the loop and maintain this state to get more data.
-        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse, still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse (%u new, %u total), still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state], recvrv, s->inbuf_parsed);
     }
 }
 
