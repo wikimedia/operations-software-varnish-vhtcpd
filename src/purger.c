@@ -134,7 +134,7 @@ struct purger {
     bool purge_full_url;
     unsigned vhead;          // queue vhead index
     int fd;
-    unsigned outbuf_size;    // total size of current buffered message
+    unsigned outbuf_bytes;   // total size of current buffered message
     unsigned outbuf_written; // bytes of the message sent so far...
     unsigned inbuf_parsed;
     unsigned io_timeout;     // these two are fixed via config
@@ -198,7 +198,7 @@ static void purger_assert_sanity(purger_t* s) {
     switch(s->state) {
         case PST_NOTCONN_IDLE:
             dmn_assert(s->fd == -1);
-            dmn_assert(!s->outbuf_size);
+            dmn_assert(!s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
             dmn_assert(!ev_is_active(s->write_watcher));
@@ -207,7 +207,7 @@ static void purger_assert_sanity(purger_t* s) {
             break;
         case PST_CONNECTING:
             dmn_assert(s->fd != -1);
-            dmn_assert(s->outbuf_size);
+            dmn_assert(s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
             dmn_assert(ev_is_active(s->write_watcher));
@@ -215,7 +215,7 @@ static void purger_assert_sanity(purger_t* s) {
             break;
         case PST_NOTCONN_WAIT:
             dmn_assert(s->fd == -1);
-            dmn_assert(s->outbuf_size);
+            dmn_assert(s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
             dmn_assert(!ev_is_active(s->write_watcher));
@@ -223,22 +223,22 @@ static void purger_assert_sanity(purger_t* s) {
             break;
         case PST_SENDWAIT:
             dmn_assert(s->fd != -1);
-            dmn_assert(s->outbuf_size);
-            dmn_assert(s->outbuf_written < s->outbuf_size);
+            dmn_assert(s->outbuf_bytes);
+            dmn_assert(s->outbuf_written < s->outbuf_bytes);
             dmn_assert(!s->inbuf_parsed);
             dmn_assert(ev_is_active(s->write_watcher));
             dmn_assert(ev_is_active(s->read_watcher));
             break;
         case PST_RECVWAIT:
             dmn_assert(s->fd != -1);
-            dmn_assert(s->outbuf_size);
-            dmn_assert(s->outbuf_written == s->outbuf_size);
+            dmn_assert(s->outbuf_bytes);
+            dmn_assert(s->outbuf_written == s->outbuf_bytes);
             dmn_assert(!ev_is_active(s->write_watcher));
             dmn_assert(ev_is_active(s->read_watcher));
             break;
         case PST_CONN_IDLE:
             dmn_assert(s->fd != -1);
-            dmn_assert(!s->outbuf_size);
+            dmn_assert(!s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
             dmn_assert(!ev_is_active(s->write_watcher));
@@ -264,7 +264,7 @@ static const unsigned uf_hostpath = (1 << UF_HOST) | (1 << UF_PATH);
 // true retval => reject for parse failure
 static bool encode_to_outbuf(purger_t* s, const char* url, unsigned url_len) {
     dmn_assert(s); dmn_assert(url); dmn_assert(url_len);
-    dmn_assert(!s->outbuf_size); // no other packet currently buffered
+    dmn_assert(!s->outbuf_bytes); // no other packet currently buffered
     dmn_assert(!s->outbuf_written); // no other packet currently buffered
 
     bool rv = true;
@@ -300,7 +300,7 @@ static bool encode_to_outbuf(purger_t* s, const char* url, unsigned url_len) {
             memcpy(writeptr, out_middle, out_middle_len); writeptr += out_middle_len;
             memcpy(writeptr,         hn,         hn_len); writeptr +=         hn_len;
             memcpy(writeptr, out_suffix, out_suffix_len); writeptr += out_suffix_len;
-            s->outbuf_size = total_len;
+            s->outbuf_bytes = total_len;
             rv = false;
         }
     }
@@ -331,7 +331,7 @@ static void purger_connect(purger_t* s) {
     // we arrive in this function from several states/callbacks, but
     //   in all cases they should put us in this intermediate state first:
     dmn_assert(s->fd == -1);
-    dmn_assert(s->outbuf_size);
+    dmn_assert(s->outbuf_bytes);
     dmn_assert(!s->outbuf_written);
     dmn_assert(!s->inbuf_parsed);
     dmn_assert(!ev_is_active(s->timeout_watcher));
@@ -427,7 +427,7 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
     }
 
     dmn_assert(s->state == PST_SENDWAIT);
-    const unsigned to_send = s->outbuf_size - s->outbuf_written;
+    const unsigned to_send = s->outbuf_bytes - s->outbuf_written;
     int writerv = send(s->fd, &s->outbuf[s->outbuf_written], to_send, 0);
     if(writerv == -1) {
         switch(errno) {
@@ -466,7 +466,7 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
         else {
             dmn_assert(writerv == (int)to_send);
             s->outbuf_written += writerv;
-            dmn_assert(s->outbuf_written == s->outbuf_size);
+            dmn_assert(s->outbuf_written == s->outbuf_bytes);
             s->state = PST_RECVWAIT;
             ev_io_stop(s->loop, s->write_watcher);
         }
@@ -496,11 +496,11 @@ static void close_from_read_cb(purger_t* s, const bool clear_current) {
         s->outbuf_written = 0;
 
         if(clear_current) {
-            s->outbuf_size = 0;
+            s->outbuf_bytes = 0;
             dequeue_to_outbuf(s);
         }
 
-        if(s->outbuf_size) // existing, or clear_current -> next queue entry
+        if(s->outbuf_bytes) // existing, or clear_current -> next queue entry
             purger_connect(s);
         else
             s->state = PST_NOTCONN_IDLE;
@@ -575,7 +575,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
 
             // reset i/o progress
-            s->outbuf_size = s->outbuf_written = s->inbuf_parsed = 0;
+            s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
 
             // no matter which path, current timer needs to go
             ev_timer_stop(s->loop, s->timeout_watcher);
