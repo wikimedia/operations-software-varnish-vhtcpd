@@ -606,12 +606,10 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             }
         }
         else {
+            // If neither of the above, parser consumed all available data and didn't complete the message,
+            //  so just return to the loop and maintain this state to get more data.
             dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse, still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
         }
-
-        // If neither of the above, parser consumed all available data and didn't complete the message,
-        //  so just return to the loop and maintain this state to get more data.
-        return;
     }
 }
 
