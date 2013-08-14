@@ -1,3 +1,12 @@
+0.0.9 - 2013-08-14
+  Limit HTTP purge connections to 15 minutes or 10K requests
+    per-connection.  Otherwise they seem to live indefinitely,
+    which is bound to eventually trigger a bug in vhtcpd or
+    varnish somewhere.
+  Added queue_size and queue_max_size stats output.  queue_size
+    is the current size at the moment of stats snapshot, whereas
+    max tracks the peak value since initialization (even a spike
+    between snapshots), and is reset on queue wipe due to overflow.
 
 0.0.8 - 2013-07-02
   Fixed HTTP response parsing bug that caused queue backlog
