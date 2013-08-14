@@ -44,14 +44,18 @@ static void log_stats(ev_tstamp now) {
                  " inpkts_sane: %" PRIu64
                  " inpkts_enqueued: %" PRIu64
                  " inpkts_dequeued: %" PRIu64
-                 " queue_overflows: %" PRIu64,
+                 " queue_overflows: %" PRIu64
+                 " queue_size: %" PRIu64
+                 " queue_max_size: %" PRIu64,
                  (uint64_t)start_time,
                  (uint64_t)(now - start_time),
                  stats.inpkts_recvd,
                  stats.inpkts_sane,
                  stats.inpkts_enqueued,
                  stats.inpkts_dequeued,
-                 stats.queue_overflows
+                 stats.queue_overflows,
+                 stats.queue_size,
+                 stats.queue_max_size
     );
 }
 
@@ -69,6 +73,8 @@ static void write_stats_file(ev_tstamp now) {
                  " inpkts_enqueued:%" PRIu64
                  " inpkts_dequeued:%" PRIu64
                  " queue_overflows:%" PRIu64
+                 " queue_size:%" PRIu64
+                 " queue_max_size:%" PRIu64
                  "\n",
                  (uint64_t)start_time,
                  (uint64_t)(now - start_time),
@@ -76,7 +82,9 @@ static void write_stats_file(ev_tstamp now) {
                  stats.inpkts_sane,
                  stats.inpkts_enqueued,
                  stats.inpkts_dequeued,
-                 stats.queue_overflows
+                 stats.queue_overflows,
+                 stats.queue_size,
+                 stats.queue_max_size
     );
     if(fpf_rv < 0) {
         dmn_log_err("Failed to write data to stats tmpfile '%s': %s", outfn_tmp, dmn_logf_errno());

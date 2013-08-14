@@ -57,7 +57,6 @@ struct strq {
     unsigned q_tail;    // always mod q_alloc
     unsigned q_alloc;   // allocation size of "queue" above
     unsigned q_size;    // used from allocation, always < q_alloc
-    unsigned q_maxsize; // peak value of the above over time...
 
     // Virtual heads for multiple dequeuers operating in parallel
     // Note that at least one head always matches the true head, and
@@ -173,6 +172,7 @@ const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead) {
             q->q_head++;
             q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
             q->q_size--;
+            stats.queue_size--;
             if(!q->q_size) {
                 // if this was the last entry remaining, it's an easy optimization
                 //   to go ahead and reset the string head/tails back to zero to
@@ -265,6 +265,8 @@ static void wipe_queue(strq_t* q) {
     stats.queue_overflows++;
     q->q_size = q->q_head = q->q_tail = 0;
     q->str_head = q->str_tail = 0;
+    stats.queue_size = 0;
+    stats.queue_max_size = 0;
     memset(q->vheads, 0, q->num_vheads * sizeof(unsigned));
     assert_queue_sane(q);
 }
@@ -285,6 +287,7 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
     //   but the upside is q_head != q_tail unless the queue is empty,
     //   which makes other logic simpler with the virtual heads...
     q->q_size++;
+    stats.queue_size++;
     if(q->q_size == q->q_alloc) {
         if(q->str_alloc + ((q->q_alloc << 1) * sizeof(qentry_t)) > q->max_mem)
             return wipe_queue(q);
@@ -307,9 +310,9 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
                 q->vheads[i] += old_alloc;
     }
 
-    // queue sizing and peak-tracking
-    if(q->q_size > q->q_maxsize)
-        q->q_maxsize = q->q_size;
+    // peak-tracking
+    if(q->q_size > stats.queue_max_size)
+        stats.queue_max_size = q->q_size;
 
     // update tail pointer
     qentry_t* qe = &q->queue[q->q_tail];

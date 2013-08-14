@@ -53,6 +53,14 @@
 #define CONN_WAIT_INIT 1U
 #define CONN_WAIT_MAX 32U
 
+// Limits on time/purges per purging socket.  It seems that Varnish imposes no
+//   limit here other than inter-purge idle time, so it's a good idea that we
+//   close() occasionally to avoid pushing corner-case bug buttons.  At 10K
+//   reqs or 15 minutes, we're still getting the vast majority of the benefit,
+//   so this is basically a free safety valve.
+#define PERSIST_REQS 10000U
+#define PERSIST_TIME 900.0
+
 // These are the 6 possible states of the purger object.
 // Note in the state transition code that we often *could* skip
 //   straight through multiple states without returning to libev
@@ -141,6 +149,8 @@ struct purger {
     unsigned io_timeout;     // these two are fixed via config
     unsigned idle_timeout;   // these two are fixed via config
     unsigned conn_wait_timeout; // dynamic, rises until success...
+    ev_tstamp fd_expire;
+    unsigned fd_reqs;
     dmn_anysin_t daddr;
     char* outbuf;
     char* inbuf;
@@ -204,6 +214,7 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(!s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
+            dmn_assert(!s->fd_reqs);
             dmn_assert(!ev_is_active(s->write_watcher));
             dmn_assert(!ev_is_active(s->read_watcher));
             dmn_assert(!ev_is_active(s->timeout_watcher));
@@ -213,6 +224,7 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
+            dmn_assert(!s->fd_reqs);
             dmn_assert(ev_is_active(s->write_watcher));
             dmn_assert(!ev_is_active(s->read_watcher));
             break;
@@ -221,6 +233,7 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
+            dmn_assert(!s->fd_reqs);
             dmn_assert(!ev_is_active(s->write_watcher));
             dmn_assert(!ev_is_active(s->read_watcher));
             break;
@@ -326,6 +339,20 @@ static bool dequeue_to_outbuf(purger_t* s) {
     return true;
 }
 
+// Common socket-close code
+static void purger_closefd(purger_t* s) {
+    shutdown(s->fd, SHUT_RDWR);
+    close(s->fd);
+    s->fd = -1;
+    s->fd_expire = 0.;
+    s->fd_reqs = 0;
+}
+
+static bool purger_check_fd_limits(purger_t* s) {
+    return (s->fd_reqs > PERSIST_REQS)
+        || (s->fd_expire <= ev_now(s->loop));
+}
+
 static void purger_connect(purger_t* s) {
     dmn_assert(s);
 
@@ -368,10 +395,8 @@ static void purger_connect(purger_t* s) {
         if(errno != EINPROGRESS) {
             // hard/fast failure
             dmn_log_err("TCP connect to %s failed: %s", dmn_logf_anysin(&s->daddr), dmn_logf_errno());
+            purger_closefd(s);
             s->state = PST_NOTCONN_WAIT;
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
             if(s->conn_wait_timeout < CONN_WAIT_MAX)
                 s->conn_wait_timeout <<= 1;
             ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
@@ -388,6 +413,7 @@ static void purger_connect(purger_t* s) {
     }
     else {
         // immediate success, straight to send attempt
+        s->fd_expire = ev_now(s->loop) + PERSIST_TIME;
         s->state = PST_SENDWAIT;
         s->conn_wait_timeout = CONN_WAIT_INIT;
         ev_io_set(s->write_watcher, s->fd, EV_WRITE);
@@ -415,10 +441,8 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
         getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len);
         if(so_error) {
             dmn_log_err("TCP connect() failed: %s", dmn_logf_errnum(so_error));
+            purger_closefd(s);
             s->state = PST_NOTCONN_WAIT;
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
             if(s->conn_wait_timeout < CONN_WAIT_MAX)
                 s->conn_wait_timeout <<= 1;
             ev_io_stop(s->loop, s->write_watcher);
@@ -428,6 +452,7 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
             return;
         }
         else { // successful connect(), alter state and fall through to the first send attempt
+            s->fd_expire = ev_now(s->loop) + PERSIST_TIME;
             s->state = PST_SENDWAIT;
             s->conn_wait_timeout = CONN_WAIT_INIT;
             ev_io_set(s->read_watcher, s->fd, EV_READ);
@@ -459,9 +484,7 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
 
         // reset state to try this send from the top on a fresh connection...
         s->outbuf_written = 0;
-        shutdown(s->fd, SHUT_RDWR);
-        close(s->fd);
-        s->fd = -1;
+        purger_closefd(s);
         ev_io_stop(s->loop, s->write_watcher);
         ev_io_stop(s->loop, s->read_watcher);
         ev_timer_stop(s->loop, s->timeout_watcher);
@@ -487,9 +510,7 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
 //   based on presence of another queued request, otherwise reconnect to
 //   re-send the current request.
 static void close_from_read_cb(purger_t* s, const bool clear_current) {
-    shutdown(s->fd, SHUT_RDWR);
-    close(s->fd);
-    s->fd = -1;
+    purger_closefd(s);
     ev_timer_stop(s->loop, s->timeout_watcher);
     ev_io_stop(s->loop, s->read_watcher);
 
@@ -583,16 +604,15 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         // XXX pr.status_ok will just be for stats?
         dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
 
-        // reset i/o progress
+        // reset i/o progress + inc connection reqs
         s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
+        s->fd_reqs++;
 
         // no matter which path, current timer needs to go
         ev_timer_stop(s->loop, s->timeout_watcher);
 
-        if(pr.need_to_close) {
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
+        if(pr.need_to_close || purger_check_fd_limits(s)) {
+            purger_closefd(s);
             ev_io_stop(s->loop, s->read_watcher);
             if(!dequeue_to_outbuf(s))
                 purger_connect(s);
@@ -633,17 +653,13 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
         case PST_CONN_IDLE:
             s->state = PST_NOTCONN_IDLE;
             ev_io_stop(s->loop, s->read_watcher);
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
+            purger_closefd(s);
             break;
         case PST_CONNECTING:
             dmn_log_warn("connect() to %s timed out", dmn_logf_anysin(&s->daddr));
             s->state = PST_NOTCONN_WAIT;
             ev_io_stop(s->loop, s->write_watcher);
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
+            purger_closefd(s);
             if(s->conn_wait_timeout < CONN_WAIT_MAX)
                 s->conn_wait_timeout <<= 1;
             ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
@@ -654,9 +670,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
             s->outbuf_written = 0;
             ev_io_stop(s->loop, s->write_watcher);
             ev_io_stop(s->loop, s->read_watcher);
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
+            purger_closefd(s);
             purger_connect(s);
             break;
         case PST_RECVWAIT:
@@ -664,9 +678,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
             s->outbuf_written = 0;
             s->inbuf_parsed = 0;
             ev_io_stop(s->loop, s->read_watcher);
-            shutdown(s->fd, SHUT_RDWR);
-            close(s->fd);
-            s->fd = -1;
+            purger_closefd(s);
             purger_connect(s);
             break;
         case PST_NOTCONN_WAIT:
@@ -755,10 +767,8 @@ void purger_destroy(purger_t* s) {
     ev_io_stop(s->loop, s->write_watcher);
     ev_io_stop(s->loop, s->read_watcher);
     ev_timer_stop(s->loop, s->timeout_watcher);
-    if(s->fd != -1) {
-        shutdown(s->fd, SHUT_RDWR);
-        close(s->fd);
-    }
+    if(s->fd != -1)
+        purger_closefd(s);
     free(s->write_watcher);
     free(s->read_watcher);
     free(s->timeout_watcher);
