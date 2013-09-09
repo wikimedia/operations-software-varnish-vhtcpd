@@ -578,6 +578,11 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         close_from_read_cb(s, false);
         return;
     }
+    else if(recvrv == 0) {
+        dmn_log_err("TCP conn to %s: connection closed while waiting on response", dmn_logf_anysin(&s->daddr));
+        close_from_read_cb(s, false);
+        return;
+    }
 
     if(recvrv == (int)to_recv) {
         // TCP might want to give us more data than the buffer can hold, expand it the buffer
