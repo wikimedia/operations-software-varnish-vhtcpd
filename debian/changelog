@@ -1,3 +1,9 @@
+vhtcpd (0.0.10-3) unstable; urgency=low
+
+  * Fixed Build-Depends (was missing libpcre3-dev and libev-dev)
+
+ -- Brandon Black <bblack@wikimedia.org>  Thu, 23 Oct 2014 16:52:40 +0000
+
 vhtcpd (0.0.10-1) unstable; urgency=low
 
   * bump "upstream" for updates
