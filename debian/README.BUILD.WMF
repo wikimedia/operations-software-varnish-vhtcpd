@@ -1,0 +1,12 @@
+How I last built this on copper.eqiad.wmnet (it has submodules and blah blah)...
+
+------ added to ~/.gitconfig:
+[http]
+	proxy = http://webproxy.eqiad.wmnet:8080
+[https]
+	proxy = http://webproxy.eqiad.wmnet:8080
+------
+export http_proxy=http://webproxy.eqiad.wmnet:8080
+git clone https://gerrit.wikimedia.org/r/operations/software/varnish/vhtcpd
+git checkout debian
+DIST=jessie ARCH=amd64 WIKIMEDIA=yes git buildpackage --git-submodules --git-pbuilder --git-debian-branch=debian --git-upstream-branch=master --git-upstream-tree=branch --git-export-dir=../build-area --git-dist=jessie -us -uc
