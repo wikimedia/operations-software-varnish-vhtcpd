@@ -192,6 +192,12 @@ http_parser_settings psettings = {
     .on_message_complete = msg_complete_cb
 };
 
+#ifdef NDEBUG
+
+#define purger_assert_sanity(x) ((void)(0))
+
+#else
+
 // Obviously, these assertions aren't always true mid-function
 //   while transitioning from one state to another.  They're the
 //   states we should be in when we return to the eventloop, and
@@ -264,6 +270,8 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(0);
     }
 }
+
+#endif
 
 // The fixed parts of the request string.
 // The two holes are for the URL and the hostname.

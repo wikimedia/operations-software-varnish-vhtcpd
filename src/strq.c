@@ -82,6 +82,12 @@ struct strq {
     ev_timer* reclaim_timer;
 };
 
+#ifdef NDEBUG
+
+#define assert_queue_sane(x) ((void)(0))
+
+#else
+
 static void assert_queue_sane(strq_t* q) {
     dmn_assert(q);
     dmn_assert(q->q_size < q->q_alloc);
@@ -112,6 +118,8 @@ static void assert_queue_sane(strq_t* q) {
             one_vhead_is_head = true;
     dmn_assert(one_vhead_is_head);
 }
+
+#endif
 
 static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents);
 
