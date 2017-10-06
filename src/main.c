@@ -402,7 +402,7 @@ int main(int argc, char* argv[]) {
     // set up an array of purger objects
     purgers = malloc(cfg->num_purgers * sizeof(purger_t*));
     for(unsigned i = 0; i < cfg->num_purgers; i++)
-        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], cfg->max_queue_mb, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
+        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], cfg->max_queue_mb, cfg->io_timeout, cfg->idle_timeout);
 
     // set up the singular receiver, with purger[0] as the dequeur
     receiver_t* receiver = receiver_new(
@@ -410,7 +410,8 @@ int main(int argc, char* argv[]) {
         cfg->matcher,
         cfg->matcher_extra,
         purgers[0],
-        cfg->lsock
+        cfg->lsock,
+        cfg->purge_full_url
     );
 
     // Finish daemonization (release initial process and stderr)

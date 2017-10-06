@@ -42,9 +42,6 @@
 //   of keep-alive, apparently varnish closes after every
 //   response to a PURGE, currently.
 
-// this buffer holds a fully-formed HTTP request to purge a single URL.
-#define OUTBUF_SIZE 4096U
-
 // this buffer holds the complete HTTP response we get, and can grow at runtime
 #define INBUF_INITSIZE 4096U
 
@@ -139,7 +136,6 @@ static const char* state_strs[] = {
 
 struct purger {
     purger_state_t state;
-    bool purge_full_url;
     int fd;
     unsigned outbuf_bytes;   // total size of current buffered message
     unsigned outbuf_written; // bytes of the message sent so far...
@@ -268,75 +264,21 @@ static void purger_assert_sanity(purger_t* s) {
 
 #endif
 
-// The fixed parts of the request string.
-// The two holes are for the URL and the hostname.
-static const char out_prefix[] = "PURGE ";
-static const unsigned out_prefix_len = sizeof(out_prefix) - 1;
-static const char out_middle[] = " HTTP/1.1\r\nHost: ";
-static const unsigned out_middle_len = sizeof(out_middle) - 1;
-static const char out_suffix[] = "\r\nUser-Agent: vhtcpd\r\n\r\n";
-static const unsigned out_suffix_len = sizeof(out_suffix) - 1;
-
-// bits for url parser object with at least host + path defined
-static const unsigned uf_hostpath = (1 << UF_HOST) | (1 << UF_PATH);
-
-// true retval => reject for parse failure
-static bool encode_to_outbuf(purger_t* s, const char* url, unsigned url_len) {
-    dmn_assert(s); dmn_assert(url); dmn_assert(url_len);
+// rv: false -> placed something in outbuf
+//     true -> queue empty, nothing placed in outbuf
+static bool dequeue_to_outbuf(purger_t* s) {
+    dmn_assert(s);
+    dmn_assert(s->outbuf);
     dmn_assert(!s->outbuf_bytes); // no other packet currently buffered
     dmn_assert(!s->outbuf_written); // no other packet currently buffered
 
-    bool rv = true;
-
-    struct http_parser_url up;
-    memset(&up, 0, sizeof(struct http_parser_url));
-    if(http_parser_parse_url(url, url_len, 0, &up) || ((up.field_set & uf_hostpath) != uf_hostpath)) {
-        dmn_log_warn("Rejecting enqueued URL, cannot parse host + path: %s", url);
-    }
-    else {
-        const char* path_etc;
-        unsigned path_etc_len;
-        if(s->purge_full_url) {
-            path_etc = url;
-            path_etc_len = url_len;
-        }
-        else {
-            path_etc = &url[up.field_data[UF_PATH].off];
-            path_etc_len = url_len - up.field_data[UF_PATH].off;
-        }
-
-        const char* hn = &url[up.field_data[UF_HOST].off];
-        const unsigned hn_len = up.field_data[UF_HOST].len;
-
-        const unsigned total_len = out_prefix_len + path_etc_len + out_middle_len + hn_len + out_suffix_len;
-        if(total_len > OUTBUF_SIZE) {
-            dmn_log_warn("Rejecting enqueued URL for excessive size: %s", url);
-        }
-        else {
-            char* writeptr = s->outbuf;
-            memcpy(writeptr, out_prefix, out_prefix_len); writeptr += out_prefix_len;
-            memcpy(writeptr,   path_etc,   path_etc_len); writeptr +=   path_etc_len;
-            memcpy(writeptr, out_middle, out_middle_len); writeptr += out_middle_len;
-            memcpy(writeptr,         hn,         hn_len); writeptr +=         hn_len;
-            memcpy(writeptr, out_suffix, out_suffix_len); writeptr += out_suffix_len;
-            s->outbuf_bytes = total_len;
-            rv = false;
-        }
-    }
-
-    return rv;
-}
-
-// rv: false -> placed something in outbuf
-//     true -> queue (effectively) empty, nothing placed in outbuf
-static bool dequeue_to_outbuf(purger_t* s) {
-    dmn_assert(s);
-
-    unsigned url_len;
-    const char* url;
-    while((url = strq_dequeue(s->queue, &url_len))) {
-        if(!encode_to_outbuf(s, url, url_len))
-            return false;
+    unsigned req_len;
+    const char* req;
+    req = strq_dequeue(s->queue, &req_len);
+    if(req) {
+        memcpy(s->outbuf, req, req_len);
+        s->outbuf_bytes = req_len;
+        return false;
     }
 
     return true;
@@ -698,10 +640,9 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     }
 }
 
-purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, unsigned max_mb, bool purge_full_url, unsigned io_timeout, unsigned idle_timeout) {
+purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, unsigned max_mb, unsigned io_timeout, unsigned idle_timeout) {
     purger_t* s = calloc(1, sizeof(purger_t));
     s->fd = -1;
-    s->purge_full_url = purge_full_url;
     s->inbuf_size = INBUF_INITSIZE;
     s->outbuf = malloc(OUTBUF_SIZE);
     s->inbuf = malloc(s->inbuf_size);
@@ -732,12 +673,12 @@ purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, unsigned m
     return s;
 }
 
-void purger_enqueue(purger_t* s, const char* url, const unsigned url_len) {
-    dmn_assert(s); dmn_assert(url); dmn_assert(url_len);
+void purger_enqueue(purger_t* s, const char* req, const unsigned req_len) {
+    dmn_assert(s); dmn_assert(req); dmn_assert(req_len);
     dmn_log_debug("purger: %s/%s -> hit purger_ping()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
     purger_assert_sanity(s);
 
-    strq_enqueue(s->queue, url, url_len);
+    strq_enqueue(s->queue, req, req_len);
     stats.inpkts_enqueued++;
 
     // enqueue can happen in any state, but actions differ:

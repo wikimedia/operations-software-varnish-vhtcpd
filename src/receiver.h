@@ -22,7 +22,8 @@ receiver_t* receiver_new(
     const pcre* matcher,
     const pcre_extra* matcher_extra,
     purger_t* purger,
-    int lsock
+    int lsock,
+    bool purge_full_url
 );
 void receiver_destroy(receiver_t* r);
 
