@@ -32,6 +32,7 @@
 #include <arpa/inet.h>
 #include <fcntl.h>
 
+#include "stats.h"
 #include "strq.h"
 #include "libdmn/dmn.h"
 #include "http-parser/http_parser.h"
@@ -139,7 +140,6 @@ static const char* state_strs[] = {
 struct purger {
     purger_state_t state;
     bool purge_full_url;
-    unsigned vhead;          // queue vhead index
     int fd;
     unsigned outbuf_bytes;   // total size of current buffered message
     unsigned outbuf_written; // bytes of the message sent so far...
@@ -334,7 +334,7 @@ static bool dequeue_to_outbuf(purger_t* s) {
 
     unsigned url_len;
     const char* url;
-    while((url = strq_dequeue(s->queue, &url_len, s->vhead))) {
+    while((url = strq_dequeue(s->queue, &url_len))) {
         if(!encode_to_outbuf(s, url, url_len))
             return false;
     }
@@ -698,7 +698,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     }
 }
 
-purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* queue, unsigned vhead, bool purge_full_url, unsigned io_timeout, unsigned idle_timeout) {
+purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, unsigned max_mb, bool purge_full_url, unsigned io_timeout, unsigned idle_timeout) {
     purger_t* s = calloc(1, sizeof(purger_t));
     s->fd = -1;
     s->purge_full_url = purge_full_url;
@@ -706,8 +706,7 @@ purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* qu
     s->outbuf = malloc(OUTBUF_SIZE);
     s->inbuf = malloc(s->inbuf_size);
     s->parser = malloc(sizeof(http_parser));
-    s->queue = queue;
-    s->vhead = vhead;
+    s->queue = strq_new(loop, max_mb);
     s->loop = loop;
     s->io_timeout = io_timeout;
     s->idle_timeout = idle_timeout;
@@ -733,14 +732,13 @@ purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, strq_t* qu
     return s;
 }
 
-void purger_ping(purger_t* s) {
-    dmn_assert(s);
+void purger_enqueue(purger_t* s, const char* url, const unsigned url_len) {
+    dmn_assert(s); dmn_assert(url); dmn_assert(url_len);
     dmn_log_debug("purger: %s/%s -> hit purger_ping()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
     purger_assert_sanity(s);
 
-    // ping is called immediately after an enqueue, thus dequeue
-    //   always has an item to fetch
-    dmn_assert(!strq_is_empty(s->queue, s->vhead));
+    strq_enqueue(s->queue, url, url_len);
+    stats.inpkts_enqueued++;
 
     // enqueue can happen in any state, but actions differ:
     switch(s->state) {
@@ -784,5 +782,6 @@ void purger_destroy(purger_t* s) {
     free(s->inbuf);
     free(s->outbuf);
     free(s->parser);
+    strq_destroy(s->queue);
     free(s);
 }

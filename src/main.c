@@ -27,7 +27,6 @@
 #include <ev.h>
 #include "purger.h"
 #include "receiver.h"
-#include "strq.h"
 #include "stats.h"
 #include "libdmn/dmn.h"
 #include "config.h"
@@ -400,22 +399,17 @@ int main(int argc, char* argv[]) {
     // stats has a timeout callback for reporting
     stats_init(loop, cfg->statsfile);
 
-    // set up the string queue
-    strq_t* queue = strq_new(loop, cfg->max_queue_mb, cfg->num_purgers);
-
     // set up an array of purger objects
     purgers = malloc(cfg->num_purgers * sizeof(purger_t*));
     for(unsigned i = 0; i < cfg->num_purgers; i++)
-        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], queue, i, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
+        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], cfg->max_queue_mb, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
 
-    // set up the singular receiver
+    // set up the singular receiver, with purger[0] as the dequeur
     receiver_t* receiver = receiver_new(
         loop,
         cfg->matcher,
         cfg->matcher_extra,
-        queue,
-        purgers,
-        cfg->num_purgers,
+        purgers[0],
         cfg->lsock
     );
 
@@ -430,7 +424,6 @@ int main(int argc, char* argv[]) {
     receiver_destroy(receiver);
     for(unsigned i = 0; i < cfg->num_purgers; i++)
         purger_destroy(purgers[i]);
-    strq_destroy(queue);
     ev_loop_destroy(loop);
     cfg_destroy(cfg);
 

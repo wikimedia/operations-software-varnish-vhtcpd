@@ -62,12 +62,10 @@
 
 struct receiver {
     int fd;
-    unsigned num_purgers;
     char* inbuf;
     struct ev_loop* loop;
     ev_io* read_watcher;
-    strq_t* queue;
-    purger_t** purgers;
+    purger_t* purger;
     const pcre* matcher;
     const pcre_extra* matcher_extra;
 };
@@ -189,22 +187,16 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
 
         dmn_log_debug("receiver: packet %u passed regex filter...", MAX_TIGHT_RECV - recv_ctr);
 
-        // actually enqueue the request to the purgers
-        strq_enqueue(r->queue, url, url_len);
-        stats.inpkts_enqueued++;
-
-        // ping the purgers to make them check the queue if they're idle
-        for(unsigned i = 0; i < r->num_purgers; i++)
-            purger_ping(r->purgers[i]);
-
+        // send to purger's input queue
+        purger_enqueue(r->purger, url, url_len);
         queued_ctr--;
     }
 
     dmn_log_debug("receiver: done recv()ing, enqueued: %u", MAX_TIGHT_QUEUE - queued_ctr);
 }
 
-receiver_t* receiver_new(struct ev_loop* loop, const pcre* matcher, const pcre_extra* matcher_extra, strq_t* queue, purger_t** purgers, unsigned num_purgers, int lsock) {
-    dmn_assert(loop); dmn_assert(queue); dmn_assert(purgers); dmn_assert(num_purgers);
+receiver_t* receiver_new(struct ev_loop* loop, const pcre* matcher, const pcre_extra* matcher_extra, purger_t* purger, int lsock) {
+    dmn_assert(loop); dmn_assert(purger);
 
     receiver_t* r = malloc(sizeof(receiver_t));
     r->inbuf = malloc(INBUF_SIZE);
@@ -212,9 +204,7 @@ receiver_t* receiver_new(struct ev_loop* loop, const pcre* matcher, const pcre_e
     r->matcher = matcher;
     r->matcher_extra = matcher_extra;
     r->loop = loop;
-    r->queue = queue;
-    r->purgers = purgers;
-    r->num_purgers = num_purgers;
+    r->purger = purger;
     r->fd = lsock;
     ev_io_init(r->read_watcher, receiver_read_cb, r->fd, EV_READ);
     ev_set_priority(r->read_watcher, 2);

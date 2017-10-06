@@ -58,12 +58,6 @@ struct strq {
     unsigned q_alloc;   // allocation size of "queue" above
     unsigned q_size;    // used from allocation, always < q_alloc
 
-    // Virtual heads for multiple dequeuers operating in parallel
-    // Note that at least one head always matches the true head, and
-    //   one or more others could be ahead of the true head
-    unsigned num_vheads;
-    unsigned* vheads;
-
     // The string storage doesn't wrap.  New space is consumed
     //   at the end and released from the front, until it becomes
     //   necessary to memmove() whatever remains to the bottom
@@ -93,8 +87,6 @@ static void assert_queue_sane(strq_t* q) {
     dmn_assert(q->q_size < q->q_alloc);
     dmn_assert(q->q_head < q->q_alloc);
     dmn_assert(q->q_tail < q->q_alloc);
-    for(unsigned i = 0; i < q->num_vheads; i++)
-        dmn_assert(q->vheads[i] < q->q_alloc);
     dmn_assert(q->str_head < q->str_alloc);
     dmn_assert(q->str_tail <= q->str_alloc);
     if(q->q_size) {
@@ -110,28 +102,19 @@ static void assert_queue_sane(strq_t* q) {
             i &= itermask;
         } while(i != q->q_tail);
     }
-
-    // at least one vhead is at the real head...
-    bool one_vhead_is_head = false;
-    for(unsigned i = 0; i < q->num_vheads; i++)
-        if(q->vheads[i] == q->q_head)
-            one_vhead_is_head = true;
-    dmn_assert(one_vhead_is_head);
 }
 
 #endif
 
 static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents);
 
-strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads) {
-    dmn_assert(loop); dmn_assert(max_mb); dmn_assert(num_vheads);
+strq_t* strq_new(struct ev_loop* loop, unsigned max_mb) {
+    dmn_assert(loop); dmn_assert(max_mb);
 
     const unsigned max_mem = max_mb * 1024 * 1024;
     dmn_assert(max_mem > ((INIT_QSIZE * sizeof(qentry_t)) + INIT_STRSIZE));
     strq_t* q = calloc(1, sizeof(strq_t));
     q->max_mem = max_mem;
-    q->num_vheads = num_vheads;
-    q->vheads = calloc(num_vheads, sizeof(unsigned));
     q->q_alloc = INIT_QSIZE;
     q->str_alloc = INIT_STRSIZE;
     q->queue = malloc(q->q_alloc * sizeof(qentry_t));
@@ -145,53 +128,37 @@ strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads) {
     return q;
 }
 
-unsigned strq_is_empty(const strq_t* q, unsigned vhead) {
-    dmn_assert(q); dmn_assert(vhead < q->num_vheads);
-    return (q->vheads[vhead] == q->q_tail);
+unsigned strq_is_empty(const strq_t* q) {
+    dmn_assert(q);
+    return (q->q_size == 0);
 }
 
-const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead) {
-    dmn_assert(q); dmn_assert(len_outptr); dmn_assert(vhead < q->num_vheads);
+const char* strq_dequeue(strq_t* q, unsigned* len_outptr) {
+    dmn_assert(q); dmn_assert(len_outptr);
 
     const char* rv = NULL;
-    const unsigned this_vhead = q->vheads[vhead];
-    if(this_vhead != q->q_tail) {
-        qentry_t* qe = &q->queue[this_vhead];
+    if(q->q_size) {
+        qentry_t* qe = &q->queue[q->q_head];
         dmn_assert(qe->len > 1);
         dmn_assert(qe->idx < q->str_alloc);
         rv = &q->strings[qe->idx];
         *len_outptr = qe->len - 1; // convert back from storage size to strlen size
-
-        bool advance_head = false;
-        if(this_vhead == q->q_head) { // we pulled from the real head
-            advance_head = true;
-            // a different vhead is also pointing at the real head...
-            for(unsigned i = 0; i < q->num_vheads; i++)
-                if(i != vhead && q->vheads[i] == this_vhead)
-                    advance_head = false;
+        stats.inpkts_dequeued++;
+        q->q_head++;
+        q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
+        q->q_size--;
+        stats.queue_size--;
+        if(!q->q_size) {
+            // if this was the last entry remaining, it's an easy optimization
+            //   to go ahead and reset the string head/tails back to zero to
+            //   avoid unnecc move/shift later.
+            dmn_assert((q->str_head + qe->len) == q->str_tail);
+            q->str_head = q->str_tail = 0;
+        }
+        else {
+            q->str_head += qe->len;
         }
 
-        // advance the current vhead
-        q->vheads[vhead]++;
-        q->vheads[vhead] &= (q->q_alloc - 1U); // mod po2 to wrap
-
-        if(advance_head) {
-            stats.inpkts_dequeued++;
-            q->q_head++;
-            q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
-            q->q_size--;
-            stats.queue_size--;
-            if(!q->q_size) {
-                // if this was the last entry remaining, it's an easy optimization
-                //   to go ahead and reset the string head/tails back to zero to
-                //   avoid unnecc move/shift later.
-                dmn_assert((q->str_head + qe->len) == q->str_tail);
-                q->str_head = q->str_tail = 0;
-            }
-            else {
-                q->str_head += qe->len;
-            }
-        }
         assert_queue_sane(q);
     }
     return rv;
@@ -275,7 +242,6 @@ static void wipe_queue(strq_t* q) {
     q->str_head = q->str_tail = 0;
     stats.queue_size = 0;
     stats.queue_max_size = 0;
-    memset(q->vheads, 0, q->num_vheads * sizeof(unsigned));
     assert_queue_sane(q);
 }
 
@@ -312,10 +278,6 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
             q->q_tail += old_alloc;
         }
         dmn_assert(q->q_tail < q->q_alloc); // new tail within new storage
-        // handle vhead moves if they were memcpy'd from the wrapped area
-        for(unsigned i = 0; i < q->num_vheads; i++)
-            if(q->vheads[i] < q->q_head)
-                q->vheads[i] += old_alloc;
     }
 
     // peak-tracking
@@ -355,8 +317,6 @@ static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents) {
         if(q->q_size) {
             if(q->q_head <= q->q_tail) {
                 memmove(q->queue, &q->queue[q->q_head], q->q_size * sizeof(qentry_t));
-                for(unsigned i = 0; i < q->num_vheads; i++)
-                    q->vheads[i] -= q->q_head;
                 q->q_tail -= q->q_head;
                 q->q_head = 0;
             }
@@ -365,17 +325,11 @@ static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents) {
                 const unsigned start_len = q->q_size - end_len;
                 memmove(&q->queue[end_len], q->queue, start_len * sizeof(qentry_t));
                 memcpy(q->queue, &q->queue[q->q_head], end_len * sizeof(qentry_t));
-                for(unsigned i = 0; i < q->num_vheads; i++)
-                    if(q->vheads[i] > q->q_tail)
-                        q->vheads[i] -= q->q_head;
-                    else
-                        q->vheads[i] += end_len;
                 q->q_tail += end_len;
                 q->q_head = 0;
             }
         }
         else { // empty queue
-            memset(q->vheads, 0, q->num_vheads * sizeof(unsigned));
             q->q_head = q->q_tail = 0;
         }
 
@@ -399,7 +353,6 @@ static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents) {
 
 void strq_destroy(strq_t* q) {
     ev_timer_stop(q->loop, q->reclaim_timer);
-    free(q->vheads);
     free(q->reclaim_timer);
     free(q->strings);
     free(q->queue);

@@ -11,21 +11,16 @@
  *  during enqueue.  Storage is downsized if excess
  *  space is very excessive, once in a while on a low
  *  priority libev callback.
- * There are a fixed count of virtual heads on this queue,
- *  the idea being that multiple independent dequeuers can
- *  work through the entries, and entries are not removed
- *  from the head until all virtual heads have advanced past
- *  an entry.
  */
 
 struct strq;
 typedef struct strq strq_t;
 
 // Create a new queue for strings
-strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads);
+strq_t* strq_new(struct ev_loop* loop, unsigned max_mb);
 
-// Anything pending for this vhead?
-unsigned strq_is_empty(const strq_t* q, unsigned vhead);
+// Anything pending
+unsigned strq_is_empty(const strq_t* q);
 
 // Remove a string from the queue.  NULL retval
 //   if queue is empty.  Note that the returned string
@@ -37,7 +32,7 @@ unsigned strq_is_empty(const strq_t* q, unsigned vhead);
 //   set at all if the retval is NULL.
 // Basically any return to libev or any call other than _get_size()
 //   is going to invalidate the string.
-const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead);
+const char* strq_dequeue(strq_t* q, unsigned* len_outptr);
 
 // Copy a new string onto the tail of the queue.  Must be
 //   NUL-terminated, and "len" should be the strlen() length of it.
