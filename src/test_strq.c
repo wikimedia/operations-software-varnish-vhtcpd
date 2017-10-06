@@ -16,6 +16,7 @@ static const unsigned test_len_2 = sizeof(test_str_2) - 1;
 
 int main(int argc, char* argv[]) {
     dmn_init_log("test_strq", true);
+    dmn_log_info("%s", argv[argc - 1]);
     struct ev_loop* loop = ev_loop_new(0);
     strq_t* q = strq_new(loop, 2, 3);
 

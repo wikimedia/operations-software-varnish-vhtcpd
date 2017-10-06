@@ -152,22 +152,32 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     // Basic cmdline parse
     int optch;
-    while((optch = getopt(argc, argv, "dFt:T:u:p:a:r:l:m:c:")) != -1) {
+    while((optch = getopt(argc, argv, "a:c:dFl:m:p:r:s:T:t:u:")) != -1) {
         switch(optch) {
+            case 'a':
+                if_addr = optarg;
+                break;
+            case 'c':
+                num_purgers++;
+                purger_addrs = realloc(purger_addrs, num_purgers * sizeof(char*));
+                purger_addrs[num_purgers - 1] = optarg;
+                break;
             case 'd':
                 cfg->debug = true;
                 break;
             case 'F':
                 cfg->purge_full_url = true;
                 break;
-            case 'u':
-                cfg->username = strdup(optarg);
+            case 'l':
+                cfg->max_queue_mb = (unsigned)atoi(optarg);
+                break;
+            case 'm':
+                num_mcs++;
+                mc_addrs = realloc(mc_addrs, num_mcs * sizeof(char*));
+                mc_addrs[num_mcs - 1] = optarg;
                 break;
             case 'p':
                 cfg->pidfile = strdup(optarg);
-                break;
-            case 'a':
-                if_addr = optarg;
                 break;
             case 'r':
                 match_str = optarg;
@@ -175,24 +185,14 @@ static cfg_t* handle_args(int argc, char* argv[]) {
             case 's':
                 cfg->statsfile = strdup(optarg);
                 break;
-            case 'l':
-                cfg->max_queue_mb = (unsigned)atoi(optarg);
+            case 'T':
+                cfg->idle_timeout = (unsigned)atoi(optarg);
                 break;
             case 't':
                 cfg->io_timeout = (unsigned)atoi(optarg);
                 break;
-            case 'T':
-                cfg->idle_timeout = (unsigned)atoi(optarg);
-                break;
-            case 'm':
-                num_mcs++;
-                mc_addrs = realloc(mc_addrs, num_mcs * sizeof(char*));
-                mc_addrs[num_mcs - 1] = optarg;
-                break;
-            case 'c':
-                num_purgers++;
-                purger_addrs = realloc(purger_addrs, num_purgers * sizeof(char*));
-                purger_addrs[num_purgers - 1] = optarg;
+            case 'u':
+                cfg->username = strdup(optarg);
                 break;
             default:
                 usage(argv[0]);
@@ -393,7 +393,7 @@ int main(int argc, char* argv[]) {
 
     // Basic libev setup
     ev_set_syserr_cb(syserr_for_ev);
-    struct ev_loop* loop = ev_loop_new(0);
+    struct ev_loop* loop = ev_default_loop(EVBACKEND_SELECT);
     setup_signals(loop);
     ev_set_timeout_collect_interval(loop, 0.1);
 

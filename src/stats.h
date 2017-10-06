@@ -10,6 +10,7 @@ typedef struct {
     uint64_t inpkts_sane;
     uint64_t inpkts_enqueued;
     uint64_t inpkts_dequeued;
+    uint64_t inpkts_sent;
     uint64_t queue_overflows;
     uint64_t queue_size;
     uint64_t queue_max_size;

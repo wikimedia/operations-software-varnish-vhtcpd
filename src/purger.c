@@ -51,15 +51,14 @@
 //  and/or timing out.  The wait doubles after every failure (but limited to the
 //  max), and is reset to initial value on connection success.
 #define CONN_WAIT_INIT 1U
-#define CONN_WAIT_MAX 32U
+#define CONN_WAIT_MAX 8U
 
-// Limits on time/purges per purging socket.  It seems that Varnish imposes no
-//   limit here other than inter-purge idle time, so it's a good idea that we
-//   close() occasionally to avoid pushing corner-case bug buttons.  At 10K
-//   reqs or 15 minutes, we're still getting the vast majority of the benefit,
-//   so this is basically a free safety valve.
-#define PERSIST_REQS 10000U
-#define PERSIST_TIME 900.0
+// Limit uptime of each purging socket.  It seems that Varnish imposes no limit
+//   here other than inter-purge idle time, so it's a good idea that we close()
+//   occasionally to avoid pushing corner-case bug buttons.  At ~53 minutes,
+//   we're still getting the vast majority of the benefit, so this is basically
+//   a free safety valve.
+#define PERSIST_TIME 3181.0
 
 // These are the 6 possible states of the purger object.
 // Note in the state transition code that we often *could* skip
@@ -150,7 +149,6 @@ struct purger {
     unsigned idle_timeout;   // these two are fixed via config
     unsigned conn_wait_timeout; // dynamic, rises until success...
     ev_tstamp fd_expire;
-    unsigned fd_reqs;
     dmn_anysin_t daddr;
     char* outbuf;
     char* inbuf;
@@ -220,7 +218,6 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(!s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
-            dmn_assert(!s->fd_reqs);
             dmn_assert(!ev_is_active(s->write_watcher));
             dmn_assert(!ev_is_active(s->read_watcher));
             dmn_assert(!ev_is_active(s->timeout_watcher));
@@ -230,7 +227,6 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
-            dmn_assert(!s->fd_reqs);
             dmn_assert(ev_is_active(s->write_watcher));
             dmn_assert(!ev_is_active(s->read_watcher));
             break;
@@ -239,7 +235,6 @@ static void purger_assert_sanity(purger_t* s) {
             dmn_assert(s->outbuf_bytes);
             dmn_assert(!s->outbuf_written);
             dmn_assert(!s->inbuf_parsed);
-            dmn_assert(!s->fd_reqs);
             dmn_assert(!ev_is_active(s->write_watcher));
             dmn_assert(!ev_is_active(s->read_watcher));
             break;
@@ -353,12 +348,10 @@ static void purger_closefd(purger_t* s) {
     close(s->fd);
     s->fd = -1;
     s->fd_expire = 0.;
-    s->fd_reqs = 0;
 }
 
 static bool purger_check_fd_limits(purger_t* s) {
-    return (s->fd_reqs > PERSIST_REQS)
-        || (s->fd_expire <= ev_now(s->loop));
+    return (s->fd_expire <= ev_now(s->loop));
 }
 
 static void purger_connect(purger_t* s) {
@@ -518,6 +511,9 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
 //   based on presence of another queued request, otherwise reconnect to
 //   re-send the current request.
 static void close_from_read_cb(purger_t* s, const bool clear_current) {
+    dmn_assert(s);
+    dmn_assert(s->state == PST_CONN_IDLE || s->state == PST_SENDWAIT || s->state == PST_RECVWAIT);
+
     purger_closefd(s);
     ev_timer_stop(s->loop, s->timeout_watcher);
     ev_io_stop(s->loop, s->read_watcher);
@@ -619,7 +615,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
 
         // reset i/o progress + inc connection reqs
         s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
-        s->fd_reqs++;
+        stats.inpkts_sent++;
 
         // no matter which path, current timer needs to go
         ev_timer_stop(s->loop, s->timeout_watcher);

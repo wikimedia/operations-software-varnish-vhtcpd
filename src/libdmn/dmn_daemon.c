@@ -151,8 +151,6 @@ static void parent_status_wait(const int readpipe) {
 }
 
 void dmn_daemonize(const char* pidfile, const bool restart) {
-    dmn_assert(pidfile);
-
     // This pipe is used to communicate daemonization success
     //   (which must happen two forks later because fcntl() does
     //   not fork-inherit) back to the top-level parent for
@@ -232,11 +230,9 @@ void dmn_daemonize_finish(void) {
     dmn_log_close_alt_stderr();
 }
 
-pid_t dmn_status(const char* pidfile) { dmn_assert(pidfile); return check_pidfile(pidfile); }
+pid_t dmn_status(const char* pidfile) { return check_pidfile(pidfile); }
 
 pid_t dmn_stop(const char* pidfile) {
-    dmn_assert(pidfile);
-
     const pid_t pid = check_pidfile(pidfile);
     if(!pid) {
         dmn_log_info("Did not find a running daemon to stop!");
@@ -268,8 +264,6 @@ pid_t dmn_stop(const char* pidfile) {
 }
 
 int dmn_signal(const char* pidfile, int sig) {
-    dmn_assert(pidfile);
-
     int rv = 1; // error
     const pid_t pid = check_pidfile(pidfile);
     if(!pid) {
