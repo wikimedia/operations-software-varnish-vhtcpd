@@ -149,6 +149,8 @@ struct purger {
     char* outbuf;
     char* inbuf;
     strq_t* queue;
+    purger_t* next_purger;
+    purger_stats_t* pstats;
     struct ev_loop* loop;
     ev_io* write_watcher;
     ev_io* read_watcher;
@@ -555,9 +557,11 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         // XXX pr.status_ok will just be for stats?
         dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
 
-        // reset i/o progress + inc connection reqs
+        // copy to next purger + inc counters + reset i/o progress
+        if(s->next_purger)
+            purger_enqueue(s->next_purger, s->outbuf, s->outbuf_bytes);
+        s->pstats->inpkts_sent++;
         s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
-        stats.inpkts_sent++;
 
         // no matter which path, current timer needs to go
         ev_timer_stop(s->loop, s->timeout_watcher);
@@ -640,14 +644,16 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     }
 }
 
-purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, unsigned max_mb, unsigned io_timeout, unsigned idle_timeout) {
+purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, purger_t* next_purger, purger_stats_t* pstats, unsigned max_mb, unsigned io_timeout, unsigned idle_timeout) {
     purger_t* s = calloc(1, sizeof(purger_t));
+    s->pstats = pstats;
     s->fd = -1;
     s->inbuf_size = INBUF_INITSIZE;
     s->outbuf = malloc(OUTBUF_SIZE);
     s->inbuf = malloc(s->inbuf_size);
     s->parser = malloc(sizeof(http_parser));
-    s->queue = strq_new(loop, max_mb);
+    s->queue = strq_new(loop, pstats, max_mb);
+    s->next_purger = next_purger;
     s->loop = loop;
     s->io_timeout = io_timeout;
     s->idle_timeout = idle_timeout;
@@ -679,7 +685,6 @@ void purger_enqueue(purger_t* s, const char* req, const unsigned req_len) {
     purger_assert_sanity(s);
 
     strq_enqueue(s->queue, req, req_len);
-    stats.inpkts_enqueued++;
 
     // enqueue can happen in any state, but actions differ:
     switch(s->state) {

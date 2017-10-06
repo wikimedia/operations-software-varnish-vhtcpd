@@ -3,6 +3,7 @@
 #define VHTCPD_STRQ_H
 
 #include <ev.h>
+#include "stats.h"
 
 /*
  * This is a single-threaded queue of strings with
@@ -17,7 +18,7 @@ struct strq;
 typedef struct strq strq_t;
 
 // Create a new queue for strings
-strq_t* strq_new(struct ev_loop* loop, unsigned max_mb);
+strq_t* strq_new(struct ev_loop* loop, purger_stats_t* pstats, unsigned max_mb);
 
 // Anything pending
 unsigned strq_is_empty(const strq_t* q);

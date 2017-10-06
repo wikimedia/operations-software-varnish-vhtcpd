@@ -31,6 +31,7 @@
 #define LOG_INTERVAL 900
 
 stats_t stats;
+static unsigned num_purgers;
 static ev_tstamp start_time;
 static ev_timer* file_timer;
 static ev_timer* log_timer;
@@ -38,27 +39,35 @@ static char* outfn;
 static char* outfn_tmp;
 
 static void log_stats(ev_tstamp now) {
-    dmn_log_info("Stats: start: %" PRIu64
+    dmn_log_info("Receiver: start: %" PRIu64
                  " uptime: %" PRIu64
                  " inpkts_recvd: %" PRIu64
                  " inpkts_sane: %" PRIu64
-                 " inpkts_enqueued: %" PRIu64
-                 " inpkts_dequeued: %" PRIu64
-                 " inpkts_sent: %" PRIu64
-                 " queue_overflows: %" PRIu64
-                 " queue_size: %" PRIu64
-                 " queue_max_size: %" PRIu64,
+                 " purgers: %u",
                  (uint64_t)start_time,
                  (uint64_t)(now - start_time),
                  stats.inpkts_recvd,
                  stats.inpkts_sane,
-                 stats.inpkts_enqueued,
-                 stats.inpkts_dequeued,
-                 stats.inpkts_sent,
-                 stats.queue_overflows,
-                 stats.queue_size,
-                 stats.queue_max_size
+                 num_purgers
     );
+
+    for (unsigned i = 0; i < num_purgers; i++) {
+        dmn_log_info("Purger%u: "
+                     " inpkts_enqueued: %" PRIu64
+                     " inpkts_dequeued: %" PRIu64
+                     " inpkts_sent: %" PRIu64
+                     " queue_overflows: %" PRIu64
+                     " queue_size: %" PRIu64
+                     " queue_max_size: %" PRIu64,
+                     i,
+                     stats.purgers[i].inpkts_enqueued,
+                     stats.purgers[i].inpkts_dequeued,
+                     stats.purgers[i].inpkts_sent,
+                     stats.purgers[i].queue_overflows,
+                     stats.purgers[i].queue_size,
+                     stats.purgers[i].queue_max_size
+        );
+    }
 }
 
 static void write_stats_file(ev_tstamp now) {
@@ -68,31 +77,48 @@ static void write_stats_file(ev_tstamp now) {
         return;
     }
 
-    int fpf_rv = fprintf(outfile, "start:%" PRIu64
+    int fpf_rv = fprintf(outfile,
+                 "start:%" PRIu64
                  " uptime:%" PRIu64
                  " inpkts_recvd:%" PRIu64
                  " inpkts_sane:%" PRIu64
-                 " inpkts_enqueued:%" PRIu64
-                 " inpkts_dequeued:%" PRIu64
-                 " inpkts_sent:%" PRIu64
-                 " queue_overflows:%" PRIu64
-                 " queue_size:%" PRIu64
-                 " queue_max_size:%" PRIu64
-                 "\n",
+                 " purgers:%u\n",
                  (uint64_t)start_time,
                  (uint64_t)(now - start_time),
                  stats.inpkts_recvd,
                  stats.inpkts_sane,
-                 stats.inpkts_enqueued,
-                 stats.inpkts_dequeued,
-                 stats.inpkts_sent,
-                 stats.queue_overflows,
-                 stats.queue_size,
-                 stats.queue_max_size
+                 num_purgers
     );
     if(fpf_rv < 0) {
         dmn_log_err("Failed to write data to stats tmpfile '%s': %s", outfn_tmp, dmn_logf_errno());
+        fclose(outfile);
         return;
+    }
+
+    for (unsigned i = 0; i < num_purgers; i++) {
+        fprintf(outfile,
+                "Purger%u:"
+                " inpkts_enqueued:%" PRIu64
+                " inpkts_dequeued:%" PRIu64
+                " inpkts_sent:%" PRIu64
+                " queue_overflows:%" PRIu64
+                " queue_size:%" PRIu64
+                " queue_max_size:%" PRIu64
+                "\n",
+                i,
+                stats.purgers[i].inpkts_enqueued,
+                stats.purgers[i].inpkts_dequeued,
+                stats.purgers[i].inpkts_sent,
+                stats.purgers[i].queue_overflows,
+                stats.purgers[i].queue_size,
+                stats.purgers[i].queue_max_size
+        );
+
+        if(fpf_rv < 0) {
+            dmn_log_err("Failed to write data to stats tmpfile '%s': %s", outfn_tmp, dmn_logf_errno());
+            fclose(outfile);
+            return;
+        }
     }
 
     if(fclose(outfile)) {
@@ -116,7 +142,11 @@ static void file_timer_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     write_stats_file(now);
 }
 
-void stats_init(struct ev_loop* loop, const char* statsfile) {
+void stats_init(struct ev_loop* loop, const char* statsfile, const unsigned num_purgers_in) {
+    dmn_assert(num_purgers_in);
+    num_purgers = num_purgers_in;
+    memset(&stats, 0, sizeof(stats_t));
+    stats.purgers = calloc(num_purgers, sizeof(*stats.purgers));
     start_time = ev_time();
     const unsigned ofn_len = strlen(statsfile);
     outfn = malloc(ofn_len + 1);
@@ -124,7 +154,6 @@ void stats_init(struct ev_loop* loop, const char* statsfile) {
     memcpy(outfn, statsfile, ofn_len + 1);
     memcpy(outfn_tmp, statsfile, ofn_len);
     memcpy(&outfn_tmp[ofn_len], ".tmp\0", 4 + 1);
-    memset(&stats, 0, sizeof(stats_t));
     log_timer = malloc(sizeof(ev_timer));
     ev_timer_init(log_timer, log_timer_cb, LOG_INTERVAL, LOG_INTERVAL);
     ev_set_priority(log_timer, -2);

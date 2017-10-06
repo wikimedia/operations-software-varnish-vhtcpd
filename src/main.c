@@ -397,12 +397,20 @@ int main(int argc, char* argv[]) {
     ev_set_timeout_collect_interval(loop, 0.1);
 
     // stats has a timeout callback for reporting
-    stats_init(loop, cfg->statsfile);
+    stats_init(loop, cfg->statsfile, cfg->num_purgers);
 
-    // set up an array of purger objects
+    // set up an array of purger objects, and initialize them in reverse
+    // order so we can set up the purger->purger queueing chain
     purgers = malloc(cfg->num_purgers * sizeof(purger_t*));
-    for(unsigned i = 0; i < cfg->num_purgers; i++)
-        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], cfg->max_queue_mb, cfg->io_timeout, cfg->idle_timeout);
+    {
+        purger_t* next_purger = NULL;
+        unsigned i = cfg->num_purgers - 1;
+        do {
+            purger_stats_t* pstats = &stats.purgers[i];
+            purgers[i] = purger_new(loop, &cfg->purger_addrs[i], next_purger, pstats, cfg->max_queue_mb, cfg->io_timeout, cfg->idle_timeout);
+            next_purger = purgers[i];
+        } while(i--);
+    }
 
     // set up the singular receiver, with purger[0] as the dequeur
     receiver_t* receiver = receiver_new(

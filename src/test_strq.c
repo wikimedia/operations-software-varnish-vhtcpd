@@ -2,6 +2,7 @@
 #include <string.h>
 #include <ev.h>
 #include "strq.h"
+#include "stats.h"
 #include "libdmn/dmn.h"
 
 static const char test_str_1[] = "Test string #1";
@@ -18,8 +19,8 @@ int main(int argc, char* argv[]) {
     dmn_init_log("test_strq", true);
     dmn_log_info("%s", argv[argc - 1]);
     struct ev_loop* loop = ev_loop_new(0);
-    strq_t* q = strq_new(loop, 2);
-
+    stats_init(loop, "/tmp/testme", 1);
+    strq_t* q = strq_new(loop, &stats.purgers[0], 2);
 
     const char* deq_str = NULL;
     unsigned deq_len = 0;

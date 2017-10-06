@@ -71,6 +71,8 @@ struct strq {
 
     unsigned max_mem;   // total memory limit for queue+strings
 
+    purger_stats_t* pstats;
+
     // watchers for reclamation and stats(?)
     struct ev_loop* loop;
     ev_timer* reclaim_timer;
@@ -108,12 +110,13 @@ static void assert_queue_sane(strq_t* q) {
 
 static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents);
 
-strq_t* strq_new(struct ev_loop* loop, unsigned max_mb) {
+strq_t* strq_new(struct ev_loop* loop, purger_stats_t* pstats, unsigned max_mb) {
     dmn_assert(loop); dmn_assert(max_mb);
 
     const unsigned max_mem = max_mb * 1024 * 1024;
     dmn_assert(max_mem > ((INIT_QSIZE * sizeof(qentry_t)) + INIT_STRSIZE));
     strq_t* q = calloc(1, sizeof(strq_t));
+    q->pstats = pstats;
     q->max_mem = max_mem;
     q->q_alloc = INIT_QSIZE;
     q->str_alloc = INIT_STRSIZE;
@@ -143,11 +146,11 @@ const char* strq_dequeue(strq_t* q, unsigned* len_outptr) {
         dmn_assert(qe->idx < q->str_alloc);
         rv = &q->strings[qe->idx];
         *len_outptr = qe->len - 1; // convert back from storage size to strlen size
-        stats.inpkts_dequeued++;
+        q->pstats->inpkts_dequeued++;
         q->q_head++;
         q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
         q->q_size--;
-        stats.queue_size--;
+        q->pstats->queue_size--;
         if(!q->q_size) {
             // if this was the last entry remaining, it's an easy optimization
             //   to go ahead and reset the string head/tails back to zero to
@@ -237,11 +240,11 @@ static unsigned store_string(strq_t* q, const char* new_string, unsigned len) {
 static void wipe_queue(strq_t* q) {
     dmn_assert(q);
     dmn_log_err("Queue growth excessive! Wiping out backlog to prevent runaway memory growth");
-    stats.queue_overflows++;
+    q->pstats->queue_overflows++;
     q->q_size = q->q_head = q->q_tail = 0;
     q->str_head = q->str_tail = 0;
-    stats.queue_size = 0;
-    stats.queue_max_size = 0;
+    q->pstats->queue_size = 0;
+    q->pstats->queue_max_size = 0;
     assert_queue_sane(q);
 }
 
@@ -261,7 +264,8 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
     //   but the upside is q_head != q_tail unless the queue is empty,
     //   which makes other logic simpler with the virtual heads...
     q->q_size++;
-    stats.queue_size++;
+    q->pstats->queue_size++;
+    q->pstats->inpkts_enqueued++;
     if(q->q_size == q->q_alloc) {
         if(q->str_alloc + ((q->q_alloc << 1) * sizeof(qentry_t)) > q->max_mem)
             return wipe_queue(q);
@@ -281,8 +285,8 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
     }
 
     // peak-tracking
-    if(q->q_size > stats.queue_max_size)
-        stats.queue_max_size = q->q_size;
+    if(q->q_size > q->pstats->queue_max_size)
+        q->pstats->queue_max_size = q->q_size;
 
     // update tail pointer
     qentry_t* qe = &q->queue[q->q_tail];
