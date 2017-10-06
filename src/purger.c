@@ -172,7 +172,7 @@ static int msg_complete_cb(http_parser* p) {
 
     pr->cb_called = true;
     pr->need_to_close = !http_should_keep_alive(p);
-    pr->status_ok = true; // XXX actually set this...
+    pr->status_ok = p->status_code < 400;
 
     return 0;
 }
@@ -180,12 +180,14 @@ static int msg_complete_cb(http_parser* p) {
 http_parser_settings psettings = {
     .on_message_begin = NULL,
     .on_url = NULL,
-    .on_status_complete = NULL,
+    .on_status = NULL,
     .on_header_field = NULL,
     .on_header_value = NULL,
     .on_headers_complete = NULL,
     .on_body = NULL,
-    .on_message_complete = msg_complete_cb
+    .on_message_complete = msg_complete_cb,
+    .on_chunk_header = NULL,
+    .on_chunk_complete = NULL
 };
 
 #ifdef NDEBUG
@@ -548,19 +550,25 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     s->parser->data = &pr;
     int hpe_parsed = http_parser_execute(s->parser, &psettings, &s->inbuf[s->inbuf_parsed], recvrv);
     s->inbuf_parsed += hpe_parsed;
-    if(hpe_parsed != recvrv) { // not parseable, could be more trailing garbage, close it all down
-        dmn_log_err("TCP conn to %s: response unparseable, dropping request", dmn_logf_anysin(&s->daddr));
+    if(s->parser->http_errno != HPE_OK || hpe_parsed != recvrv) { // not parseable, could be more trailing garbage, close it all down
+        dmn_log_err("TCP conn to %s: response unparseable (parser error %s), dropping request", dmn_logf_anysin(&s->daddr), http_errno_description(s->parser->http_errno));
         close_from_read_cb(s, true);
         return;
     }
     else if(pr.cb_called) { // parsed a full response
-        // XXX pr.status_ok will just be for stats?
         dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
 
-        // copy to next purger + inc counters + reset i/o progress
-        if(s->next_purger)
-            purger_enqueue(s->next_purger, s->outbuf, s->outbuf_bytes);
-        s->pstats->inpkts_sent++;
+        // Only forward to next purger and mark sent in stats if status was reasonable
+        if(pr.status_ok) {
+            if(s->next_purger)
+                purger_enqueue(s->next_purger, s->outbuf, s->outbuf_bytes);
+            s->pstats->inpkts_sent++;
+        }
+        else {
+            dmn_log_warn("PURGE response code was was >= 400");
+        }
+
+        // reset i/o
         s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
 
         // no matter which path, current timer needs to go
