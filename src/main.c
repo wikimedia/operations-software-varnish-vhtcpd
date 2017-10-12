@@ -34,7 +34,7 @@
 /* global libev priorities:
  *  2) receiver input
  *  1) purger i/o
- *  0) purger idle timer
+ *  0) purger timeouts/timers
  * -1) strq excess space reclamation
  * -2) stats/monitor stuff...
  */
@@ -46,7 +46,6 @@ static const char def_ifaddr[] = "0.0.0.0:4827";
 #define DEF_MCAST_PORT 4827U
 #define DEF_STATS_FILE "/tmp/" PACKAGE_NAME ".stats"
 #define DEF_IO_TIMEOUT 57U
-#define DEF_IDLE_TIMEOUT 23U
 
 static void usage(const char* argv0) {
     fprintf(stderr, PACKAGE_NAME " " PACKAGE_VERSION "\nUsage:\n"
@@ -54,7 +53,7 @@ static void usage(const char* argv0) {
 #ifndef NDEBUG
         "[-d] "
 #endif
-        "[-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u] [-s %s] [-t %u] [-T %u] -m mcast_addr -c cache_addr_port <action>\n"
+        "[-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u] [-s %s] [-t %u] -m mcast_addr -c cache_addr_port <action>\n"
 #ifndef NDEBUG
         "  -d -- Extra debug logging for developer build\n"
 #endif
@@ -66,7 +65,6 @@ static void usage(const char* argv0) {
         "  -l -- Queue limit in MB\n"
         "  -s -- Stats output filename\n"
         "  -t -- I/O timeout for purgers\n"
-        "  -T -- Idle connection timeout for purgers\n"
         "  -m -- Multicast address (required, multiple allowed)\n"
         "  -c -- Cache IP:Port or Hostname:Port (required, multiple allowed)\n"
         "<action> is one of:\n"
@@ -80,7 +78,7 @@ static void usage(const char* argv0) {
         "  try-restart - Aliases 'condrestart'\n"
         "  status - Checks the status of the running daemon\n\n",
     argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_Q_MB, DEF_STATS_FILE,
-    DEF_IO_TIMEOUT, DEF_IDLE_TIMEOUT, DEF_MCAST_PORT);
+    DEF_IO_TIMEOUT, DEF_MCAST_PORT);
     exit(99);
 }
 
@@ -130,7 +128,6 @@ typedef struct {
     unsigned max_queue_mb;
     unsigned num_purgers;
     unsigned io_timeout;
-    unsigned idle_timeout;
     char* username;
     char* pidfile;
     char* statsfile;
@@ -185,7 +182,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
                 cfg->statsfile = strdup(optarg);
                 break;
             case 'T':
-                cfg->idle_timeout = (unsigned)atoi(optarg);
+                // ignore removed option for basic backcompat
                 break;
             case 't':
                 cfg->io_timeout = (unsigned)atoi(optarg);
@@ -211,8 +208,6 @@ static cfg_t* handle_args(int argc, char* argv[]) {
         cfg->statsfile = strdup(DEF_STATS_FILE);
     if(!cfg->io_timeout)
         cfg->io_timeout = DEF_IO_TIMEOUT;
-    if(!cfg->idle_timeout)
-        cfg->idle_timeout = DEF_IDLE_TIMEOUT;
 
     // require final non-option for action
     if(optind != (argc - 1)) {
@@ -407,7 +402,7 @@ int main(int argc, char* argv[]) {
         unsigned i = cfg->num_purgers - 1;
         do {
             purger_stats_t* pstats = &stats.purgers[i];
-            purgers[i] = purger_new(loop, &cfg->purger_addrs[i], next_purger, pstats, cfg->max_queue_mb, cfg->io_timeout, cfg->idle_timeout);
+            purgers[i] = purger_new(loop, &cfg->purger_addrs[i], next_purger, pstats, cfg->max_queue_mb, cfg->io_timeout);
             next_purger = purgers[i];
         } while(i--);
     }

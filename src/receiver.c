@@ -253,6 +253,7 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     }
 
     dmn_log_debug("receiver: done recv()ing, enqueued: %u", MAX_TIGHT_QUEUE - queued_ctr);
+    purger_ping(r->purger);
 }
 
 receiver_t* receiver_new(struct ev_loop* loop, const pcre* matcher, const pcre_extra* matcher_extra, purger_t* purger, int lsock, bool purge_full_url) {

@@ -38,9 +38,6 @@
 #include "http-parser/http_parser.h"
 
 // XXX some of the below could be configurable as well
-// XXX note that while this is set up to try to take advantage
-//   of keep-alive, apparently varnish closes after every
-//   response to a PURGE, currently.
 
 // this buffer holds the complete HTTP response we get, and can grow at runtime
 #define INBUF_INITSIZE 4096U
@@ -58,74 +55,59 @@
 //   a free safety valve.
 #define PERSIST_TIME 3181.0
 
-// These are the 6 possible states of the purger object.
-// Note in the state transition code that we often *could* skip
-//   straight through multiple states without returning to libev
-//   (at least try and see if the next call doesn't EAGAIN),
-//   but we'd rather return to the loop early and often
-//   because dequeuing the UDP listener with minimum latency is
-//   more important.
-// We do attempt fall-through in the "obvious"  places like
-//   connect_success->send and read_success->send_next,
-//   but we still fully update the ev watcher states during these
-//   to keep the code simpler to follow, even when it's likely
-//   to be pointless churn.
+// These are the 5 possible states of the purger object.
+// * Note that usually in the case where a valid purger connection is open
+// and we have data to send (e.g. after completing a purger response, or
+// from the connected+idle state), we attempt to send it immediately
+// without falling back out to the eventloop.  This is because that is
+// almost always immediately successful without network delay (goes to
+// outbound tcp buffer, which always has room due to serial, small
+// transactions).  The code does exist to fall back to stalling on
+// writeability in the eventloop, but it's mostly there for correctness.
+// * In other states, we prefer to re-enter the eventloop even in cases
+// where that's locally-inefficient, because it gets us back to handling
+// the UDP receives in receiver.c quicker, where there's a real risk of
+// input falling off the socket buffer if it overfills in a spike.
+// * Note that all states use the timeout watcher, so we use it
+// ev_timer_again() mode for efficiency (method 2 in the libev docs)
 
 typedef enum {
-    // In this state, no message is pending in outbuf or the queue,
-    //   and we have no active connection and no active libev watchers.
-    // The only way out of NOTCONN_IDLE is a new purger_enqueue() call
-    //   from the receiver code.
-    PST_NOTCONN_IDLE = 0,
-
-    // In this state, there's a message pending in outbuf, and there
-    //   may or may not be more in the queue, and we're in the process
-    //   of trying to establish the outbound connection (waiting on
-    //   nonblock connect() success).
+    // In this state we're in the process of trying to establish the
+    //   outbound connection (waiting on nonblock connect() success).
+    // Possible next states: PST_CONN_IDLE, PST_NOTCONN_WAIT
+    // Active watchers: write, timeout
     PST_CONNECTING,
 
-    // This is an exception state that occurs when the connect()
-    //   attempt above fails.  We wait a short timeout before moving
-    //   back to CONNECTING and trying again.  Note that in other
-    //   connection failure cases (during read/write), we immediately
-    //   retry the connection first, and don't wait until that
-    //   connect() attempt fails.
+    // While disconnects that occur from other states (send, recv, idle)
+    //   result in an immediate reconnect attempt (connecting, above), a
+    //   failure during connecting itself results in exponential backoff
+    //   delays between reconnection attempts, and they wait out their
+    //   timers in this state.
+    // Possible next states: PST_CONNECTING
+    // Active watchers: timeout
     PST_NOTCONN_WAIT,
 
-    // In these two states, outbuf has a complete message pending,
-    //   and we have a live connection to use.
-    // In the SENDWAIT state we've written less than all bytes.
-    // In the RECVWAIT state we've written all bytes and haven't
-    //   yet read a complete response.
-    // If we eventually succeed in both sending the complete message
-    //   and receiving an acceptable response code, the transaction
-    //   will finish and outbuf will be cleared.  Whether we immediately
-    //   shift back to SENDWAIT or CONN_IDLE depends on the queue.
-    // Various failure scenarios lead to other outcomes.  Some bad
-    //   status returns from the server should lead to dropping the
-    //   current outbuf and moving on (possible bad URL).  Some
-    //   should result in terminating the connection but trying
-    //   the same URL again on the next connection.
+    // SENDWAIT means we're waiting to send request bytes to the purger.
+    // Possible next states: PST_RECVWAIT, PST_CONN_IDLE, PST_CONNECTING
+    // Active watchers: read, write?, timeout
     PST_SENDWAIT,
+
+    // Possible next states: PST_SENDWAIT, PST_CONN_IDLE, PST_CONNECTING
+    // Active watchers: read, timeout
     PST_RECVWAIT,
 
     // In this state, outbuf is empty, the queue is empty, but we still
     //   have a live HTTP connection to the server from a previous
     //   message,  and we're ready to send another message if one arrives
     //   via the queue.
-    // If the server disconnects us or we hit our own idle timeout
-    //   and disconnect from it, we'll move back to _NOTCONN and
-    //   wait there until another message needs to be sent.  If
-    //   a new URL comes in via purger_enqueue() before that, we'll
-    //   move straight back to _SENDWAIT (and then possibly right
-    //   back through to _RECVWAIT as well).
+    // Possible next states: PST_SENDWAIT, PST_CONNECTING
+    // Active watchers: read, timeout
     PST_CONN_IDLE,
 } purger_state_t;
 
 // for debug logging
 #ifndef NDEBUG
 static const char* state_strs[] = {
-    "NOTCONN_IDLE",
     "CONNECTING",
     "NOTCONN_WAIT",
     "SENDWAIT",
@@ -141,8 +123,7 @@ struct purger {
     unsigned outbuf_written; // bytes of the message sent so far...
     unsigned inbuf_size;     // dynamic resize of inbuf
     unsigned inbuf_parsed;   // consumed by parser so far
-    unsigned io_timeout;     // these two are fixed via config
-    unsigned idle_timeout;   // these two are fixed via config
+    unsigned io_timeout;     // set via config
     unsigned conn_wait_timeout; // dynamic, rises until success...
     ev_tstamp fd_expire;
     dmn_anysin_t daddr;
@@ -201,65 +182,50 @@ http_parser_settings psettings = {
 //   states we should be in when we return to the eventloop, and
 //   should be checked on entry from an eventloop callback or
 //   poke().
-static void purger_assert_sanity(purger_t* s) {
-    dmn_assert(s);
-    dmn_assert(s->outbuf);
-    dmn_assert(s->inbuf);
-    dmn_assert(s->inbuf_size);
-    dmn_assert(s->queue);
-    dmn_assert(s->loop);
-    dmn_assert(s->write_watcher);
-    dmn_assert(s->read_watcher);
-    dmn_assert(s->timeout_watcher);
+static void purger_assert_sanity(purger_t* p) {
+    dmn_assert(p);
+    dmn_assert(p->outbuf);
+    dmn_assert(p->inbuf);
+    dmn_assert(p->inbuf_size);
+    dmn_assert(p->queue);
+    dmn_assert(p->loop);
+    dmn_assert(p->write_watcher);
+    dmn_assert(p->read_watcher);
+    dmn_assert(p->timeout_watcher);
+    dmn_assert(ev_is_active(p->timeout_watcher));
 
-    switch(s->state) {
-        case PST_NOTCONN_IDLE:
-            dmn_assert(s->fd == -1);
-            dmn_assert(!s->outbuf_bytes);
-            dmn_assert(!s->outbuf_written);
-            dmn_assert(!s->inbuf_parsed);
-            dmn_assert(!ev_is_active(s->write_watcher));
-            dmn_assert(!ev_is_active(s->read_watcher));
-            dmn_assert(!ev_is_active(s->timeout_watcher));
-            break;
+    switch(p->state) {
         case PST_CONNECTING:
-            dmn_assert(s->fd != -1);
-            dmn_assert(s->outbuf_bytes);
-            dmn_assert(!s->outbuf_written);
-            dmn_assert(!s->inbuf_parsed);
-            dmn_assert(ev_is_active(s->write_watcher));
-            dmn_assert(!ev_is_active(s->read_watcher));
+            dmn_assert(p->fd != -1);
+            dmn_assert(ev_is_active(p->write_watcher));
+            dmn_assert(!ev_is_active(p->read_watcher));
             break;
         case PST_NOTCONN_WAIT:
-            dmn_assert(s->fd == -1);
-            dmn_assert(s->outbuf_bytes);
-            dmn_assert(!s->outbuf_written);
-            dmn_assert(!s->inbuf_parsed);
-            dmn_assert(!ev_is_active(s->write_watcher));
-            dmn_assert(!ev_is_active(s->read_watcher));
+            dmn_assert(p->fd == -1);
+            dmn_assert(!ev_is_active(p->write_watcher));
+            dmn_assert(!ev_is_active(p->read_watcher));
             break;
         case PST_SENDWAIT:
-            dmn_assert(s->fd != -1);
-            dmn_assert(s->outbuf_bytes);
-            dmn_assert(s->outbuf_written < s->outbuf_bytes);
-            dmn_assert(!s->inbuf_parsed);
-            dmn_assert(ev_is_active(s->write_watcher));
-            dmn_assert(ev_is_active(s->read_watcher));
+            dmn_assert(p->fd != -1);
+            dmn_assert(p->outbuf_bytes);
+            dmn_assert(p->outbuf_written < p->outbuf_bytes);
+            dmn_assert(!p->inbuf_parsed);
+            dmn_assert(ev_is_active(p->read_watcher));
             break;
         case PST_RECVWAIT:
-            dmn_assert(s->fd != -1);
-            dmn_assert(s->outbuf_bytes);
-            dmn_assert(s->outbuf_written == s->outbuf_bytes);
-            dmn_assert(!ev_is_active(s->write_watcher));
-            dmn_assert(ev_is_active(s->read_watcher));
+            dmn_assert(p->fd != -1);
+            dmn_assert(p->outbuf_bytes);
+            dmn_assert(p->outbuf_written == p->outbuf_bytes);
+            dmn_assert(!ev_is_active(p->write_watcher));
+            dmn_assert(ev_is_active(p->read_watcher));
             break;
         case PST_CONN_IDLE:
-            dmn_assert(s->fd != -1);
-            dmn_assert(!s->outbuf_bytes);
-            dmn_assert(!s->outbuf_written);
-            dmn_assert(!s->inbuf_parsed);
-            dmn_assert(!ev_is_active(s->write_watcher));
-            dmn_assert(ev_is_active(s->read_watcher));
+            dmn_assert(p->fd != -1);
+            dmn_assert(!p->outbuf_bytes);
+            dmn_assert(!p->outbuf_written);
+            dmn_assert(!p->inbuf_parsed);
+            dmn_assert(!ev_is_active(p->write_watcher));
+            dmn_assert(ev_is_active(p->read_watcher));
             break;
         default:
             dmn_assert(0);
@@ -268,52 +234,130 @@ static void purger_assert_sanity(purger_t* s) {
 
 #endif
 
-// rv: false -> placed something in outbuf
-//     true -> queue empty, nothing placed in outbuf
-static bool dequeue_to_outbuf(purger_t* s) {
-    dmn_assert(s);
-    dmn_assert(s->outbuf);
-    dmn_assert(!s->outbuf_bytes); // no other packet currently buffered
-    dmn_assert(!s->outbuf_written); // no other packet currently buffered
+static void close_socket(purger_t* p) {
+    ev_io_stop(p->loop, p->write_watcher);
+    ev_io_stop(p->loop, p->read_watcher);
+    if(p->fd != -1) {
+        shutdown(p->fd, SHUT_RDWR);
+        close(p->fd);
+    }
+    p->fd = -1;
+    p->fd_expire = 0.;
+}
 
-    unsigned req_len;
-    const char* req;
-    req = strq_dequeue(s->queue, &req_len);
-    if(req) {
-        memcpy(s->outbuf, req, req_len);
-        s->outbuf_bytes = req_len;
-        return false;
+static void purger_connect(purger_t* p);
+
+static void do_reconnect_socket(purger_t* p) {
+    close_socket(p);
+    purger_connect(p);
+}
+
+// rv "idle": false -> outbuf has a purge to send
+//            true -> queue empty, nothing in outbuf (idle-time!)
+// This should work for all outbuf/queue states.
+static bool _txn_prep_buffers(purger_t* p, const bool clear_current) {
+    dmn_assert(p);
+    dmn_assert(p->outbuf);
+    dmn_assert(p->inbuf);
+
+    bool idle = true;
+
+    p->inbuf_parsed = 0;
+    p->outbuf_written = 0;
+    if(clear_current)
+        p->outbuf_bytes = 0;
+
+    if(p->outbuf_bytes) {
+        idle = false;
+    } else {
+        unsigned req_len;
+        const char* req;
+        req = strq_dequeue(p->queue, &req_len);
+        if(req) {
+            memcpy(p->outbuf, req, req_len);
+            p->outbuf_bytes = req_len;
+            idle = false;
+        }
     }
 
-    return true;
+    return idle;
 }
 
-// Common socket-close code
-static void purger_closefd(purger_t* s) {
-    shutdown(s->fd, SHUT_RDWR);
-    close(s->fd);
-    s->fd = -1;
-    s->fd_expire = 0.;
+static void purger_write_req(purger_t* p, const bool via_watcher);
+
+// Called at any txn/connection boundary (purge success/fail, connection success).
+// Not called while cycling within reconnect attempt callbacks.
+// If the "reconnect" argument is present, this causes a disconnect->reconnect cycle,
+// otherwise it ensures the buffer has a live request if possible and moves to
+// either the idle state or the sending state.  "clear_current" wipes the
+// currently-buffered request in the case it's suspected of being malformed.
+static void on_txn_boundary(purger_t* p, const bool clear_current, const bool reconnect) {
+    dmn_assert(p);
+
+    const bool idle = _txn_prep_buffers(p, clear_current);
+    ev_tstamp now = ev_now(p->loop);
+
+    // force reconnect here if we pass our persistence limits
+    if(reconnect || p->fd_expire <= now) {
+        do_reconnect_socket(p);
+    } else if(idle) {
+        p->state = PST_CONN_IDLE;
+        ev_io_stop(p->loop, p->write_watcher);
+        p->timeout_watcher->repeat = p->fd_expire - now;
+        ev_timer_again(p->loop, p->timeout_watcher);
+    } else {
+        p->state = PST_SENDWAIT;
+        p->timeout_watcher->repeat = p->io_timeout;
+        ev_timer_again(p->loop, p->timeout_watcher);
+        purger_write_req(p, true);
+    }
 }
 
-static bool purger_check_fd_limits(purger_t* s) {
-    return (s->fd_expire <= ev_now(s->loop));
+static void on_connect_success(purger_t* p) {
+    dmn_assert(p);
+    dmn_assert(p->state == PST_CONNECTING);
+
+    dmn_log_info("TCP connection established to %s", dmn_logf_anysin(&p->daddr));
+    p->fd_expire = ev_now(p->loop) + PERSIST_TIME;
+    p->conn_wait_timeout = CONN_WAIT_INIT;
+    ev_io_stop(p->loop, p->write_watcher);
+    ev_io_set(p->read_watcher, p->fd, EV_READ);
+    ev_io_start(p->loop, p->read_watcher);
+    on_txn_boundary(p, false, false);
 }
 
-static void purger_connect(purger_t* s) {
-    dmn_assert(s);
+static void on_connect_fail(purger_t* p, const char* reason, const int so_error) {
+    dmn_assert(p);
+    dmn_assert(p->state == PST_CONNECTING);
 
-    dmn_log_debug("purger: %s/%s -> hit purger_connect()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+    dmn_log_err(
+        "TCP connect to %s failed (%s): %s",
+        dmn_logf_anysin(&p->daddr), reason,
+        so_error ? dmn_logf_errnum(so_error) : dmn_logf_errno()
+    );
+    close_socket(p);
+    p->state = PST_NOTCONN_WAIT;
+    if(p->conn_wait_timeout < CONN_WAIT_MAX)
+        p->conn_wait_timeout <<= 1;
+    p->timeout_watcher->repeat = p->conn_wait_timeout;
+    ev_timer_again(p->loop, p->timeout_watcher);
+}
 
-    // we arrive in this function from several states/callbacks, but
-    //   in all cases they should put us in this intermediate state first:
-    dmn_assert(s->fd == -1);
-    dmn_assert(s->outbuf_bytes);
-    dmn_assert(!s->outbuf_written);
-    dmn_assert(!s->inbuf_parsed);
-    dmn_assert(!ev_is_active(s->timeout_watcher));
-    dmn_assert(!ev_is_active(s->read_watcher));
-    dmn_assert(!ev_is_active(s->write_watcher));
+static void purger_connect(purger_t* p) {
+    dmn_assert(p);
+
+    dmn_log_debug("purger: %s/%s -> purger_connect()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
+
+    // we arrive in this function from several states/callbacks, but in
+    // all cases they should put us in this intermediate state first (no
+    // half-processed in or out buffers, no active i/o watchers, no
+    // socket fd)
+    dmn_assert(p->fd == -1);
+    dmn_assert(!ev_is_active(p->read_watcher));
+    dmn_assert(!ev_is_active(p->write_watcher));
+
+    // set our proper state during connection attempts
+    p->state = PST_CONNECTING;
 
     // cache the protoent, because in many cases this blocks reading a database...
     static struct protoent* pe = NULL;
@@ -324,92 +368,43 @@ static void purger_connect(purger_t* s) {
     }
 
     // These failures aren't likely to be transient...
-    s->fd = socket(PF_INET, SOCK_STREAM, pe->p_proto);
-    if(s->fd == -1)
+    p->fd = socket(PF_INET, SOCK_STREAM, pe->p_proto);
+    if(p->fd == -1)
         dmn_log_fatal("Failed to create TCP socket: %s", dmn_logf_errno());
-    if(fcntl(s->fd, F_SETFL, (fcntl(s->fd, F_GETFL, 0)) | O_NONBLOCK) == -1)
+    if(fcntl(p->fd, F_SETFL, (fcntl(p->fd, F_GETFL, 0)) | O_NONBLOCK) == -1)
         dmn_log_fatal("Failed to set O_NONBLOCK on TCP socket: %s", dmn_logf_errno());
 
     // Atypical with no intent to bind(), but may help with racing other threads for
     //  ephemeral port allocation in Linux leading to random socket errors, supposedly?
     int opt_one = 1;
-    if(setsockopt(s->fd, SOL_SOCKET, SO_REUSEADDR, &opt_one, sizeof(int)))
+    if(setsockopt(p->fd, SOL_SOCKET, SO_REUSEADDR, &opt_one, sizeof(int)))
         dmn_log_warn("Failed to set SO_REUSEADDR on TCP socket: %s", dmn_logf_errno());
 
     // Initiate a connect() attempt.  In theory this always returns -1/EINPROGRESS for
     //   a nonblocking socket, but it's possible it succeeds immediately for localhost...
-    if(connect(s->fd, &s->daddr.sa, s->daddr.len) == -1) {
+    if(connect(p->fd, &p->daddr.sa, p->daddr.len) == -1) {
         if(errno != EINPROGRESS) {
-            // hard/fast failure
-            dmn_log_err("TCP connect to %s failed: %s", dmn_logf_anysin(&s->daddr), dmn_logf_errno());
-            purger_closefd(s);
-            s->state = PST_NOTCONN_WAIT;
-            if(s->conn_wait_timeout < CONN_WAIT_MAX)
-                s->conn_wait_timeout <<= 1;
-            ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
-            ev_timer_start(s->loop, s->timeout_watcher);
+            on_connect_fail(p, "immediate", 0);
         }
         else {
             // return to libev until connection is ready
-            s->state = PST_CONNECTING;
-            ev_io_set(s->write_watcher, s->fd, EV_WRITE);
-            ev_io_start(s->loop, s->write_watcher);
-            ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
-            ev_timer_start(s->loop, s->timeout_watcher);
+            ev_io_set(p->write_watcher, p->fd, EV_WRITE);
+            ev_io_start(p->loop, p->write_watcher);
+            p->timeout_watcher->repeat = p->io_timeout;
+            ev_timer_again(p->loop, p->timeout_watcher);
         }
     }
-    else {
-        // immediate success, straight to send attempt
-        s->fd_expire = ev_now(s->loop) + PERSIST_TIME;
-        s->state = PST_SENDWAIT;
-        s->conn_wait_timeout = CONN_WAIT_INIT;
-        ev_io_set(s->write_watcher, s->fd, EV_WRITE);
-        ev_io_start(s->loop, s->write_watcher);
-        ev_io_set(s->read_watcher, s->fd, EV_READ);
-        ev_io_start(s->loop, s->read_watcher);
-        ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
-        ev_timer_start(s->loop, s->timeout_watcher);
-        ev_invoke(s->loop, s->write_watcher, EV_WRITE);
+    else { // immediately-successful connect!
+        on_connect_success(p);
     }
 }
 
-static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
-    dmn_assert(loop); dmn_assert(w); dmn_assert(revents == EV_WRITE);
+static void purger_write_req(purger_t* p, const bool via_watcher) {
+    dmn_assert(p);
+    dmn_assert(p->state == PST_SENDWAIT);
 
-    purger_t* s = w->data;
-    dmn_log_debug("purger: %s/%s -> hit purger_write_cb()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-    purger_assert_sanity(s);
-
-    // This callback only happens in two states: CONNECTING and SENDWAIT...
-
-    if(s->state == PST_CONNECTING) { // CONNECTING state, called back after EINPROGRESS wait
-        int so_error = 0;
-        unsigned int so_error_len = sizeof(so_error);
-        getsockopt(s->fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len);
-        if(so_error) {
-            dmn_log_err("TCP connect() failed: %s", dmn_logf_errnum(so_error));
-            purger_closefd(s);
-            s->state = PST_NOTCONN_WAIT;
-            if(s->conn_wait_timeout < CONN_WAIT_MAX)
-                s->conn_wait_timeout <<= 1;
-            ev_io_stop(s->loop, s->write_watcher);
-            ev_timer_stop(s->loop, s->timeout_watcher);
-            ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
-            ev_timer_start(s->loop, s->timeout_watcher);
-            return;
-        }
-        else { // successful connect(), alter state and fall through to the first send attempt
-            s->fd_expire = ev_now(s->loop) + PERSIST_TIME;
-            s->state = PST_SENDWAIT;
-            s->conn_wait_timeout = CONN_WAIT_INIT;
-            ev_io_set(s->read_watcher, s->fd, EV_READ);
-            ev_io_start(s->loop, s->read_watcher);
-        }
-    }
-
-    dmn_assert(s->state == PST_SENDWAIT);
-    const unsigned to_send = s->outbuf_bytes - s->outbuf_written;
-    int writerv = send(s->fd, &s->outbuf[s->outbuf_written], to_send, 0);
+    const unsigned to_send = p->outbuf_bytes - p->outbuf_written;
+    int writerv = send(p->fd, &p->outbuf[p->outbuf_written], to_send, 0);
     if(writerv == -1) {
         switch(errno) {
             case EAGAIN:
@@ -426,111 +421,96 @@ static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
                 break;
             default:
                 // abormal problems, mention it in the log
-                dmn_log_err("TCP conn to %s failed while writing: %s", dmn_logf_anysin(&s->daddr), dmn_logf_errno());
+                dmn_log_err("TCP conn to %s failed while writing: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
         }
 
-        // reset state to try this send from the top on a fresh connection...
-        s->outbuf_written = 0;
-        purger_closefd(s);
-        ev_io_stop(s->loop, s->write_watcher);
-        ev_io_stop(s->loop, s->read_watcher);
-        ev_timer_stop(s->loop, s->timeout_watcher);
-        purger_connect(s);
+        // close up connection and reconnect, do not clear current output buffer
+        on_txn_boundary(p, false, true);
     }
     else {
         if(writerv < (int)to_send) {
             // maintain same state, have to send more next iteration
-            s->outbuf_written += writerv;
+            p->outbuf_written += writerv;
+            if (!via_watcher)
+                ev_io_start(p->loop, p->write_watcher);
         }
         else {
             dmn_assert(writerv == (int)to_send);
-            s->outbuf_written += writerv;
-            dmn_assert(s->outbuf_written == s->outbuf_bytes);
-            s->state = PST_RECVWAIT;
-            ev_io_stop(s->loop, s->write_watcher);
+            p->outbuf_written += writerv;
+            dmn_assert(p->outbuf_written == p->outbuf_bytes);
+            p->state = PST_RECVWAIT;
+            if (via_watcher)
+                ev_io_stop(p->loop, p->write_watcher);
         }
     }
 }
 
-// Common "clean up connection" code for multiple points in the read_cb below
-// If clear_current is true, wipe the current request and decide next state
-//   based on presence of another queued request, otherwise reconnect to
-//   re-send the current request.
-static void close_from_read_cb(purger_t* s, const bool clear_current) {
-    dmn_assert(s);
-    dmn_assert(s->state == PST_CONN_IDLE || s->state == PST_SENDWAIT || s->state == PST_RECVWAIT);
+static void purger_write_cb(struct ev_loop* loop, ev_io* w, int revents) {
+    dmn_assert(loop); dmn_assert(w); dmn_assert(revents == EV_WRITE);
 
-    purger_closefd(s);
-    ev_timer_stop(s->loop, s->timeout_watcher);
-    ev_io_stop(s->loop, s->read_watcher);
+    purger_t* p = w->data;
+    dmn_log_debug("purger: %s/%s -> purger_write_cb()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
+    purger_assert_sanity(p);
 
-    if(s->state == PST_CONN_IDLE) {
-        dmn_assert(!clear_current); // there was no "current" buffer output
-        s->state = PST_NOTCONN_IDLE;
-    }
-    else { // SENDWAIT or RECVWAIT
-        if(s->state == PST_SENDWAIT)
-            ev_io_stop(s->loop, s->write_watcher);
+    // This callback only happens in two states: CONNECTING and SENDWAIT...
+
+    if(p->state == PST_CONNECTING) { // CONNECTING state, called back after EINPROGRESS wait
+        int so_error = 0;
+        unsigned int so_error_len = sizeof(so_error);
+        getsockopt(p->fd, SOL_SOCKET, SO_ERROR, &so_error, &so_error_len);
+        if(so_error)
+            on_connect_fail(p, "nonblock", so_error);
         else
-            s->inbuf_parsed = 0;
-        s->outbuf_written = 0;
-
-        if(clear_current) {
-            s->outbuf_bytes = 0;
-            dequeue_to_outbuf(s);
-        }
-
-        if(s->outbuf_bytes) // existing, or clear_current -> next queue entry
-            purger_connect(s);
-        else
-            s->state = PST_NOTCONN_IDLE;
+            on_connect_success(p);
+    } else {
+        purger_write_req(p, true);
     }
 }
 
 static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     dmn_assert(loop); dmn_assert(w); dmn_assert(revents == EV_READ);
 
-    purger_t* s = w->data;
-    purger_assert_sanity(s);
-    dmn_log_debug("purger: %s/%s -> hit purger_read_cb()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+    purger_t* p = w->data;
+    purger_assert_sanity(p);
+    dmn_log_debug("purger: %s/%s -> purger_read_cb()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
 
-    const unsigned to_recv = s->inbuf_size - s->inbuf_parsed;
-    int recvrv = recv(s->fd, &s->inbuf[s->inbuf_parsed], to_recv, 0);
+    const unsigned to_recv = p->inbuf_size - p->inbuf_parsed;
+    int recvrv = recv(p->fd, &p->inbuf[p->inbuf_parsed], to_recv, 0);
     if(recvrv < 0) {
         switch(errno) {
             case EAGAIN:
             case EINTR:
                 // no real problem, but must return to eventloop and wait more
-                dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: EAGAIN/EINTR", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+                dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: EAGAIN/EINTR", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
                 return;
             case ENOTCONN:
             case ECONNRESET:
             case ETIMEDOUT:
             case EPIPE:
                 // "normal" problems, no need to log about it
-                dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: closing due to '%s'", dmn_logf_anysin(&s->daddr), state_strs[s->state], dmn_logf_errno());
+                dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: closing due to '%s'", dmn_logf_anysin(&p->daddr), state_strs[p->state], dmn_logf_errno());
                 break;
             default:
                 // abormal problems, mention it in the log
-                dmn_log_err("TCP conn to %s failed while reading: %s", dmn_logf_anysin(&s->daddr), dmn_logf_errno());
+                dmn_log_err("TCP conn to %s failed while reading: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
         }
-        close_from_read_cb(s, false);
+        on_txn_boundary(p, false, true);
         return;
     }
 
     // From here we actually got some data...
 
-    if(s->state != PST_RECVWAIT) {
+    if(p->state != PST_RECVWAIT) {
         if(recvrv == 0)
-            dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: server closed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+            dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: server closed", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
         else
-            dmn_log_err("TCP conn to %s: received unexpected data from server during request-send or idle phases...", dmn_logf_anysin(&s->daddr));
-        close_from_read_cb(s, false);
+            dmn_log_err("TCP conn to %s: received unexpected data from server during request-send or idle phases...", dmn_logf_anysin(&p->daddr));
+        on_txn_boundary(p, false, true);
         return;
     }
     else if(recvrv == 0) {
-        dmn_log_err("TCP conn to %s: connection closed while waiting on response", dmn_logf_anysin(&s->daddr));
-        close_from_read_cb(s, false);
+        dmn_log_err("TCP conn to %s: connection closed while waiting on response", dmn_logf_anysin(&p->daddr));
+        on_txn_boundary(p, false, true);
         return;
     }
 
@@ -538,204 +518,147 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         // TCP might want to give us more data than the buffer can hold, expand it the buffer
         //  and feed what we have to the parser.  It's exceedingly likely the parse won't yet
         //  complete and we'll get another recv callback to finish up.
-        s->inbuf_size <<= 1;
-        s->inbuf = realloc(s->inbuf, s->inbuf_size);
-        dmn_log_err("TCP recv buffer for %s grew to %u", dmn_logf_anysin(&s->daddr), s->inbuf_size);
+        p->inbuf_size <<= 1;
+        p->inbuf = realloc(p->inbuf, p->inbuf_size);
+        dmn_log_err("TCP recv buffer for %s grew to %u", dmn_logf_anysin(&p->daddr), p->inbuf_size);
     }
 
-    if(!s->inbuf_parsed) // first read
-        http_parser_init(s->parser, HTTP_RESPONSE);
+    if(!p->inbuf_parsed) // first read
+        http_parser_init(p->parser, HTTP_RESPONSE);
 
     parse_res_t pr = { false, false, false };
-    s->parser->data = &pr;
-    int hpe_parsed = http_parser_execute(s->parser, &psettings, &s->inbuf[s->inbuf_parsed], recvrv);
-    s->inbuf_parsed += hpe_parsed;
-    if(s->parser->http_errno != HPE_OK || hpe_parsed != recvrv) { // not parseable, could be more trailing garbage, close it all down
-        dmn_log_err("TCP conn to %s: response unparseable (parser error %s), dropping request", dmn_logf_anysin(&s->daddr), http_errno_description(s->parser->http_errno));
-        close_from_read_cb(s, true);
+    p->parser->data = &pr;
+    int hpe_parsed = http_parser_execute(p->parser, &psettings, &p->inbuf[p->inbuf_parsed], recvrv);
+    p->inbuf_parsed += hpe_parsed;
+    if(p->parser->http_errno != HPE_OK || hpe_parsed != recvrv) { // not parseable, could be more trailing garbage, close it all down
+        dmn_log_err("TCP conn to %s: response unparseable (parser error %s), dropping request", dmn_logf_anysin(&p->daddr), http_errno_description(p->parser->http_errno));
+        on_txn_boundary(p, true, true);
         return;
     }
     else if(pr.cb_called) { // parsed a full response
-        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
+        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
 
         // Only forward to next purger and mark sent in stats if status was reasonable
         if(pr.status_ok) {
-            if(s->next_purger)
-                purger_enqueue(s->next_purger, s->outbuf, s->outbuf_bytes);
-            s->pstats->inpkts_sent++;
+            if(p->next_purger) {
+                purger_enqueue(p->next_purger, p->outbuf, p->outbuf_bytes);
+                purger_ping(p->next_purger);
+            }
+            p->pstats->inpkts_sent++;
         }
         else {
             dmn_log_warn("PURGE response code was was >= 400");
         }
 
-        // reset i/o
-        s->outbuf_bytes = s->outbuf_written = s->inbuf_parsed = 0;
-
-        // no matter which path, current timer needs to go
-        ev_timer_stop(s->loop, s->timeout_watcher);
-
-        if(pr.need_to_close || purger_check_fd_limits(s)) {
-            purger_closefd(s);
-            ev_io_stop(s->loop, s->read_watcher);
-            if(!dequeue_to_outbuf(s))
-                purger_connect(s);
-            else
-                s->state = PST_NOTCONN_IDLE;
-        }
-        else { // maintain connection
-            if(!dequeue_to_outbuf(s)) {
-                ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
-                ev_timer_start(s->loop, s->timeout_watcher);
-                ev_io_start(s->loop, s->write_watcher);
-                s->state = PST_SENDWAIT;
-                ev_invoke(s->loop, s->write_watcher, EV_WRITE); // predictive, EAGAIN if not
-            }
-            else {
-                ev_timer_set(s->timeout_watcher, s->idle_timeout, 0.);
-                ev_timer_start(s->loop, s->timeout_watcher);
-                s->state = PST_CONN_IDLE;
-            }
-        }
+        on_txn_boundary(p, true, pr.need_to_close);
     }
     else {
         // If neither of the above, parser consumed all available data and didn't complete the message,
         //  so just return to the loop and maintain this state to get more data.
-        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse (%u new, %u total), still waiting for data...", dmn_logf_anysin(&s->daddr), state_strs[s->state], recvrv, s->inbuf_parsed);
+        dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: apparent partial parse (%u new, %u total), still waiting for data...", dmn_logf_anysin(&p->daddr), state_strs[p->state], recvrv, p->inbuf_parsed);
     }
 }
 
 static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     dmn_assert(loop); dmn_assert(w); dmn_assert(revents == EV_TIMER);
 
-    purger_t* s = w->data;
-    dmn_log_debug("purger: %s/%s -> hit purger_timeout_cb()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-    purger_assert_sanity(s);
+    purger_t* p = w->data;
+    dmn_log_debug("purger: %s/%s -> purger_timeout_cb()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
+    purger_assert_sanity(p);
 
-    // this is potentially invoked in every state except NOTCONN_IDLE...
-    switch(s->state) {
+    // this is potentially invoked in every state
+    switch(p->state) {
         case PST_CONN_IDLE:
-            s->state = PST_NOTCONN_IDLE;
-            ev_io_stop(s->loop, s->read_watcher);
-            purger_closefd(s);
+            // reached fd persistence timeout during idle state
+            do_reconnect_socket(p);
             break;
         case PST_CONNECTING:
-            dmn_log_warn("connect() to %s timed out", dmn_logf_anysin(&s->daddr));
-            s->state = PST_NOTCONN_WAIT;
-            ev_io_stop(s->loop, s->write_watcher);
-            purger_closefd(s);
-            if(s->conn_wait_timeout < CONN_WAIT_MAX)
-                s->conn_wait_timeout <<= 1;
-            ev_timer_set(s->timeout_watcher, s->conn_wait_timeout, 0.);
-            ev_timer_start(s->loop, s->timeout_watcher);
+            // reached io timeout while waiting for connect() success
+            dmn_log_warn("connect() to %s timed out", dmn_logf_anysin(&p->daddr));
+            on_connect_fail(p, "timeout", 0);
             break;
         case PST_SENDWAIT:
-            dmn_log_warn("send to %s timed out", dmn_logf_anysin(&s->daddr));
-            s->outbuf_written = 0;
-            ev_io_stop(s->loop, s->write_watcher);
-            ev_io_stop(s->loop, s->read_watcher);
-            purger_closefd(s);
-            purger_connect(s);
+            // reached io timeout while waiting for send [buffer] readiness...
+            dmn_log_warn("send to %s timed out", dmn_logf_anysin(&p->daddr));
+            on_txn_boundary(p, false, true);
             break;
         case PST_RECVWAIT:
-            dmn_log_warn("recv from %s timed out after receiving %u bytes", dmn_logf_anysin(&s->daddr), s->inbuf_parsed);
-            s->outbuf_written = 0;
-            s->inbuf_parsed = 0;
-            ev_io_stop(s->loop, s->read_watcher);
-            purger_closefd(s);
-            purger_connect(s);
+            // reached io timeout while waiting for a full (or any?) response
+            dmn_log_warn("recv from %s timed out after receiving %u bytes", dmn_logf_anysin(&p->daddr), p->inbuf_parsed);
+            on_txn_boundary(p, false, true);
             break;
         case PST_NOTCONN_WAIT:
-            purger_connect(s);
+            // end of short timeout between successive connectfail->reconnect attempts
+            purger_connect(p);
             break;
         default:
             dmn_assert(0);
     }
 }
 
-purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, purger_t* next_purger, purger_stats_t* pstats, unsigned max_mb, unsigned io_timeout, unsigned idle_timeout) {
-    purger_t* s = calloc(1, sizeof(purger_t));
-    s->pstats = pstats;
-    s->fd = -1;
-    s->inbuf_size = INBUF_INITSIZE;
-    s->outbuf = malloc(OUTBUF_SIZE);
-    s->inbuf = malloc(s->inbuf_size);
-    s->parser = malloc(sizeof(http_parser));
-    s->queue = strq_new(loop, pstats, max_mb);
-    s->next_purger = next_purger;
-    s->loop = loop;
-    s->io_timeout = io_timeout;
-    s->idle_timeout = idle_timeout;
-    s->conn_wait_timeout = CONN_WAIT_INIT;
+purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, purger_t* next_purger, purger_stats_t* pstats, unsigned max_mb, unsigned io_timeout) {
+    purger_t* p = calloc(1, sizeof(purger_t));
+    p->pstats = pstats;
+    p->fd = -1;
+    p->inbuf_size = INBUF_INITSIZE;
+    p->outbuf = malloc(OUTBUF_SIZE);
+    p->inbuf = malloc(p->inbuf_size);
+    p->parser = malloc(sizeof(http_parser));
+    p->queue = strq_new(loop, pstats, max_mb);
+    p->next_purger = next_purger;
+    p->loop = loop;
+    p->io_timeout = io_timeout;
+    p->conn_wait_timeout = CONN_WAIT_INIT;
 
-    memcpy(&s->daddr, daddr, sizeof(dmn_anysin_t));
+    memcpy(&p->daddr, daddr, sizeof(dmn_anysin_t));
 
-    s->write_watcher = malloc(sizeof(ev_io));
-    ev_io_init(s->write_watcher, purger_write_cb, -1, EV_WRITE);
-    ev_set_priority(s->write_watcher, 1);
-    s->write_watcher->data = s;
+    p->write_watcher = malloc(sizeof(ev_io));
+    ev_io_init(p->write_watcher, purger_write_cb, -1, EV_WRITE);
+    ev_set_priority(p->write_watcher, 1);
+    p->write_watcher->data = p;
 
-    s->read_watcher = malloc(sizeof(ev_io));
-    ev_io_init(s->read_watcher, purger_read_cb, -1, EV_READ);
-    ev_set_priority(s->read_watcher, 1);
-    s->read_watcher->data = s;
+    p->read_watcher = malloc(sizeof(ev_io));
+    ev_io_init(p->read_watcher, purger_read_cb, -1, EV_READ);
+    ev_set_priority(p->read_watcher, 1);
+    p->read_watcher->data = p;
 
-    s->timeout_watcher = malloc(sizeof(ev_timer));
-    ev_timer_init(s->timeout_watcher, purger_timeout_cb, 0., 0.);
-    ev_set_priority(s->timeout_watcher, 0);
-    s->timeout_watcher->data = s;
+    p->timeout_watcher = malloc(sizeof(ev_timer));
+    ev_timer_init(p->timeout_watcher, purger_timeout_cb, 0., 0.);
+    ev_set_priority(p->timeout_watcher, 0);
+    p->timeout_watcher->data = p;
 
-    return s;
+    // Initiate the first connection
+    purger_connect(p);
+
+    return p;
 }
 
-void purger_enqueue(purger_t* s, const char* req, const unsigned req_len) {
-    dmn_assert(s); dmn_assert(req); dmn_assert(req_len);
-    dmn_log_debug("purger: %s/%s -> hit purger_ping()", dmn_logf_anysin(&s->daddr), state_strs[s->state]);
-    purger_assert_sanity(s);
+void purger_enqueue(purger_t* p, const char* req, const unsigned req_len) {
+    dmn_assert(p); dmn_assert(req); dmn_assert(req_len);
+    dmn_log_debug("purger: %s/%s -> purger_enqueue()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
+    purger_assert_sanity(p);
 
-    strq_enqueue(s->queue, req, req_len);
-
-    // enqueue can happen in any state, but actions differ:
-    switch(s->state) {
-        // when in either idle state, dequeue and take action immediately
-        case PST_NOTCONN_IDLE:
-            dequeue_to_outbuf(s);
-            purger_connect(s); // state transition is conditional within
-            break;
-        case PST_CONN_IDLE:
-            dequeue_to_outbuf(s);
-            ev_io_start(s->loop, s->write_watcher);
-            ev_timer_stop(s->loop, s->timeout_watcher);
-            ev_timer_set(s->timeout_watcher, s->io_timeout, 0.);
-            ev_timer_start(s->loop, s->timeout_watcher);
-            s->state = PST_SENDWAIT;
-            break;
-
-        // When in non-idle states, there's nothing to do here.
-        //   the queue will be checked when current actions are completed later
-        case PST_CONNECTING:
-        case PST_NOTCONN_WAIT:
-        case PST_SENDWAIT:
-        case PST_RECVWAIT:
-            break;
-
-        default:
-            dmn_assert(0);
-            break;
-    }
+    strq_enqueue(p->queue, req, req_len);
+    p->pstats->inpkts_enqueued++;
 }
 
-void purger_destroy(purger_t* s) {
-    ev_io_stop(s->loop, s->write_watcher);
-    ev_io_stop(s->loop, s->read_watcher);
-    ev_timer_stop(s->loop, s->timeout_watcher);
-    if(s->fd != -1)
-        purger_closefd(s);
-    free(s->write_watcher);
-    free(s->read_watcher);
-    free(s->timeout_watcher);
-    free(s->inbuf);
-    free(s->outbuf);
-    free(s->parser);
-    strq_destroy(s->queue);
-    free(s);
+void purger_ping(purger_t* p) {
+    dmn_assert(p);
+    dmn_log_debug("purger: %s/%s -> purger_ping()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
+    // In all other states we'll check the queue later on our own...
+    if(p->state == PST_CONN_IDLE)
+        on_txn_boundary(p, false, false);
+}
+
+void purger_destroy(purger_t* p) {
+    ev_timer_stop(p->loop, p->timeout_watcher);
+    close_socket(p);
+    free(p->write_watcher);
+    free(p->read_watcher);
+    free(p->timeout_watcher);
+    free(p->inbuf);
+    free(p->outbuf);
+    free(p->parser);
+    strq_destroy(p->queue);
+    free(p);
 }
