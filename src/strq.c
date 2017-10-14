@@ -27,55 +27,20 @@
 #include "stats.h"
 #include "libdmn/dmn.h"
 
-// MUST be powers of two, and don't make them any
-//   smaller than these values, please.  There may
-//   be assumptions that these values can be right-
-//   shifted N bits and still have a non-zero value...
-#define INIT_QSIZE 64U
-#define INIT_STRSIZE 4096U
-
-// Attempt excess space reclamation every ~5 minutes
-//  (faster in debug build)
-#ifdef NDEBUG
-#define RECLAIM_SECS 293U
-#else
-#define RECLAIM_SECS 17U
-#endif
-
-typedef struct {
-    unsigned idx;
-    unsigned len;
-} qentry_t;
+// MUST be a power of 2
+#define INIT_QSIZE 1024U
 
 struct strq {
     qentry_t* queue; // the queue itself
-    char* strings;   // all strings for the queue
 
     // The queue itself wraps around.  head == tail
     //  could mean empty or full, depends on size.
-    unsigned q_head;    // always mod q_alloc
-    unsigned q_tail;    // always mod q_alloc
-    unsigned q_alloc;   // allocation size of "queue" above
-    unsigned q_size;    // used from allocation, always < q_alloc
-
-    // The string storage doesn't wrap.  New space is consumed
-    //   at the end and released from the front, until it becomes
-    //   necessary to memmove() whatever remains to the bottom
-    //   and possibly expand the storage.
-    unsigned str_head;  // always mod str_alloc
-    unsigned str_tail;  // in some corner cases, this can point
-                        //  one byte off the end (== str_alloc), if
-                        //  a large new string exactly occupied the
-                        //  remaining free bytes in the tail.
-    unsigned str_alloc; // allocation size of "strings" above
-
-    unsigned max_mem;   // total memory limit for queue+strings
+    size_t q_head;    // always mod q_alloc
+    size_t q_tail;    // always mod q_alloc
+    size_t q_alloc;   // allocated slots of "queue" above
+    size_t q_size;    // used from allocation, always < q_alloc
 
     purger_stats_t* pstats;
-
-    // watchers for reclamation and stats(?)
-    struct ev_loop* loop;
-    ev_timer* reclaim_timer;
 };
 
 #ifdef NDEBUG
@@ -86,194 +51,88 @@ struct strq {
 
 static void assert_queue_sane(strq_t* q) {
     dmn_assert(q);
+    dmn_assert(q->q_alloc);
     dmn_assert(q->q_size < q->q_alloc);
     dmn_assert(q->q_head < q->q_alloc);
     dmn_assert(q->q_tail < q->q_alloc);
-    dmn_assert(q->str_head < q->str_alloc);
-    dmn_assert(q->str_tail <= q->str_alloc);
     if(q->q_size) {
+        // queue_mem assert only assumes bare min 1 byte strings
+        dmn_assert(q->pstats->queue_mem >= (q->q_alloc * sizeof(qentry_t)) + q->q_size);
         dmn_assert(q->q_head != q->q_tail);
-        const unsigned itermask = q->q_alloc - 1;
-        unsigned i = q->q_head;
+        const size_t itermask = q->q_alloc - 1;
+        size_t i = q->q_head;
         do {
             qentry_t* qe = &q->queue[i];
-            dmn_assert(qe->idx < q->str_alloc);
-            dmn_assert(qe->len > 1);
-            dmn_assert(qe->idx + qe->len <= q->str_alloc);
+            dmn_assert(qe->str);
+            dmn_assert(qe->len);
             i++;
             i &= itermask;
         } while(i != q->q_tail);
+    }
+    else {
+       // when queue is empty, queue_mem should reflect allocated structures
+       dmn_assert(q->pstats->queue_mem == (q->q_alloc * sizeof(qentry_t)));
     }
 }
 
 #endif
 
-static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents);
+strq_t* strq_new(purger_stats_t* pstats) {
+    dmn_assert(pstats);
 
-strq_t* strq_new(struct ev_loop* loop, purger_stats_t* pstats, unsigned max_mb) {
-    dmn_assert(loop); dmn_assert(max_mb);
-
-    const unsigned max_mem = max_mb * 1024 * 1024;
-    dmn_assert(max_mem > ((INIT_QSIZE * sizeof(qentry_t)) + INIT_STRSIZE));
-    strq_t* q = calloc(1, sizeof(strq_t));
+    strq_t* q = calloc(1, sizeof(*q));
     q->pstats = pstats;
-    q->max_mem = max_mem;
     q->q_alloc = INIT_QSIZE;
-    q->str_alloc = INIT_STRSIZE;
-    q->queue = malloc(q->q_alloc * sizeof(qentry_t));
-    q->strings = malloc(q->str_alloc);
-    q->loop = loop;
-    q->reclaim_timer = malloc(sizeof(ev_timer));
-    ev_timer_init(q->reclaim_timer, reclaim_cb, RECLAIM_SECS, RECLAIM_SECS);
-    ev_set_priority(q->reclaim_timer, -1);
-    q->reclaim_timer->data = q;
-    ev_timer_start(q->loop, q->reclaim_timer);
+    q->pstats->queue_mem = q->q_alloc * sizeof(*q->queue);
+    q->queue = malloc(q->pstats->queue_mem);
     return q;
 }
 
-unsigned strq_is_empty(const strq_t* q) {
+const qentry_t* strq_dequeue(strq_t* q) {
     dmn_assert(q);
-    return (q->q_size == 0);
-}
 
-const char* strq_dequeue(strq_t* q, unsigned* len_outptr) {
-    dmn_assert(q); dmn_assert(len_outptr);
-
-    const char* rv = NULL;
+    const qentry_t* qe = NULL;
     if(q->q_size) {
-        qentry_t* qe = &q->queue[q->q_head];
-        dmn_assert(qe->len > 1);
-        dmn_assert(qe->idx < q->str_alloc);
-        rv = &q->strings[qe->idx];
-        *len_outptr = qe->len - 1; // convert back from storage size to strlen size
+        qe = &q->queue[q->q_head];
+        dmn_assert(qe->str);
+        dmn_assert(qe->len);
+        q->pstats->queue_mem -= qe->len;
         q->pstats->inpkts_dequeued++;
         q->q_head++;
         q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
         q->q_size--;
         q->pstats->queue_size--;
-        if(!q->q_size) {
-            // if this was the last entry remaining, it's an easy optimization
-            //   to go ahead and reset the string head/tails back to zero to
-            //   avoid unnecc move/shift later.
-            dmn_assert((q->str_head + qe->len) == q->str_tail);
-            q->str_head = q->str_tail = 0;
-        }
-        else {
-            q->str_head += qe->len;
-        }
+
+        if(!q->q_size)
+            q->q_head = q->q_tail = 0;
 
         assert_queue_sane(q);
     }
-    return rv;
+    return qe;
 }
 
-/* q->strings and growth/move stuff:
- *
- * New strings always go on the tail, and head strings are dequeued
- *   from the head.  If at enqueue time there's no room at the tail:
- *     1) If the total free space (head+tail ends) is less than double
- *        the string length, go ahead and realloc() to larger storage.
- *     2) Move the string head to the bottom via memmove().
- */
-
-// shift all strings down such that str_head == 0
-static void strings_shift(strq_t* q) {
-    dmn_assert(q);
-    dmn_assert(q->str_head);
-    dmn_assert(q->q_size);
-
-    const unsigned move_by = q->str_head;
-
-    // adjust the strings stuff itself
-    const unsigned move_total = q->str_tail - q->str_head;
-    memmove(q->strings, &q->strings[move_by], move_total);
-    q->str_tail -= move_by;
-    q->str_head = 0;
-
-    // adjust the queue entries to reflect the above
-    const unsigned itermask = q->q_alloc - 1;
-    unsigned i = q->q_head;
-    do {
-        q->queue[i].idx -= move_by;
-        i++;
-        i &= itermask;
-    } while(i != q->q_tail);
-}
-
-// retval below if we hit the allocation limit and need to reset the queue...
-#define SS_MAXALLOC_RV 0xFFFFFFFF
-
-static unsigned store_string(strq_t* q, const char* new_string, unsigned len) {
-    dmn_assert(q); dmn_assert(new_string); dmn_assert(len > 1);
-
-    const unsigned tail_space = q->str_alloc - q->str_tail;
-    if(len > tail_space) { // no easy room at end
-        // if the string takes up half (or more) of the total
-        //   free space at the head+tail ends, go ahead and expand
-        //   the storage pool by doubling (possibly more than once,
-        //   if the string is also larger than the whole current pool size)
-        if(len > ((tail_space + q->str_head) >> 1U)) {
-            unsigned new_str_alloc = q->str_alloc;
-            while(len > new_str_alloc)
-                new_str_alloc <<= 1;
-            new_str_alloc <<= 1;
-            if(new_str_alloc + (q->q_alloc * sizeof(qentry_t)) > q->max_mem)
-                return SS_MAXALLOC_RV;
-            q->str_alloc = new_str_alloc;
-            dmn_log_debug("strq: realloc strings to %u bytes", q->str_alloc);
-            q->strings = realloc(q->strings, q->str_alloc);
-        }
-
-        // shift all free space to the end if necc
-        if(q->str_head)
-            strings_shift(q);
-   }
-
-    const unsigned new_str_idx = q->str_tail;
-    memcpy(&q->strings[new_str_idx], new_string, len);
-    q->str_tail += len;
-
-    assert_queue_sane(q);
-    return new_str_idx;
-}
-
-static void wipe_queue(strq_t* q) {
-    dmn_assert(q);
-    dmn_log_err("Queue growth excessive! Wiping out backlog to prevent runaway memory growth");
-    q->pstats->queue_overflows++;
-    q->q_size = q->q_head = q->q_tail = 0;
-    q->str_head = q->str_tail = 0;
-    q->pstats->queue_size = 0;
-    q->pstats->queue_max_size = 0;
-    assert_queue_sane(q);
-}
-
-void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
+void strq_enqueue(strq_t* q, char* new_string, const size_t len, const ev_tstamp stamp) {
     dmn_assert(q); dmn_assert(new_string); dmn_assert(len);
 
-    len++; // store the NUL, too
-
-    // store string into q->strings and get its index
-    const unsigned new_str_idx = store_string(q, new_string, len);
-
-    if(new_str_idx == SS_MAXALLOC_RV)
-        return wipe_queue(q);
+    // account for new string in all stats and qsize
+    q->pstats->queue_mem += len;
+    q->pstats->queue_size++;
+    q->pstats->inpkts_enqueued++;
+    q->q_size++;
+    if(q->q_size > q->pstats->queue_max_size)
+        q->pstats->queue_max_size = q->q_size;
 
     // handle queue re-allocation if this bump fills us.
     //   note this "wastes" the final slot by reallocating early,
     //   but the upside is q_head != q_tail unless the queue is empty,
-    //   which makes other logic simpler with the virtual heads...
-    q->q_size++;
-    q->pstats->queue_size++;
-    q->pstats->inpkts_enqueued++;
+    //   which makes other logic simpler
     if(q->q_size == q->q_alloc) {
-        if(q->str_alloc + ((q->q_alloc << 1) * sizeof(qentry_t)) > q->max_mem)
-            return wipe_queue(q);
         // first, double the raw space
-        const unsigned old_alloc = q->q_alloc;
+        const size_t old_alloc = q->q_alloc;
         q->q_alloc <<= 1;
-        dmn_log_debug("strq: realloc queue to %u entries", q->q_alloc);
-        q->queue = realloc(q->queue, q->q_alloc * sizeof(qentry_t));
+        dmn_log_debug("strq: realloc queue to %zu entries", q->q_alloc);
+        q->queue = realloc(q->queue, q->q_alloc * sizeof(*q->queue));
+        q->pstats->queue_mem += (old_alloc * sizeof(*q->queue));
         // then, move the wrapped tail end to the physical end of
         //   the original allocation
         if(q->q_head) {
@@ -284,81 +143,28 @@ void strq_enqueue(strq_t* q, const char* new_string, unsigned len) {
         dmn_assert(q->q_tail < q->q_alloc); // new tail within new storage
     }
 
-    // peak-tracking
-    if(q->q_size > q->pstats->queue_max_size)
-        q->pstats->queue_max_size = q->q_size;
-
     // update tail pointer
     qentry_t* qe = &q->queue[q->q_tail];
-    qe->idx = new_str_idx;
+    qe->str = new_string;
     qe->len = len;
+    qe->stamp = stamp;
     q->q_tail++;
     q->q_tail &= (q->q_alloc - 1); // mod po2 to wrap
 
     assert_queue_sane(q);
 }
 
-// Reclaim excessive allocation from the queue.  Invoked
-//   periodically to reduce memory waste from queue spikes,
-//   because the queue auto-grows on enqueue, but does not
-//   auto-shrink on dequeue.  The implementation avoids
-//   ping-pong cycles of reallocation (doesn't reclaim as
-//   aggressively as it grows).
-static void reclaim_cb(struct ev_loop* loop, ev_timer* w, int revents) {
-    dmn_assert(loop); dmn_assert(w); dmn_assert(revents == EV_TIMER);
-
-    strq_t* q = w->data;
-    dmn_assert(q);
-
-    dmn_log_debug("strq: periodic reclaim hit: qa: %u qs: %u qh: %u qt: %u stra: %u strh: %u strt: %u",
-            q->q_alloc, q->q_size, q->q_head, q->q_tail,
-            q->str_alloc, q->str_head, q->str_tail);
-
-    // Reclaim queue itself.  We cut the queue allocation in half
-    //   iff the current queue size is less than 1/8 of the allocation,
-    //   and is also larger than the initial size.
-    if(q->q_alloc > (q->q_size << 3) && q->q_alloc > INIT_QSIZE) {
-        if(q->q_size) {
-            if(q->q_head <= q->q_tail) {
-                memmove(q->queue, &q->queue[q->q_head], q->q_size * sizeof(qentry_t));
-                q->q_tail -= q->q_head;
-                q->q_head = 0;
-            }
-            else {
-                const unsigned end_len = q->q_alloc - q->q_head;
-                const unsigned start_len = q->q_size - end_len;
-                memmove(&q->queue[end_len], q->queue, start_len * sizeof(qentry_t));
-                memcpy(q->queue, &q->queue[q->q_head], end_len * sizeof(qentry_t));
-                q->q_tail += end_len;
-                q->q_head = 0;
-            }
-        }
-        else { // empty queue
-            q->q_head = q->q_tail = 0;
-        }
-
-        q->q_alloc >>= 1;
-        dmn_log_debug("strq: downsizing queue to %u entries", q->q_alloc);
-        q->queue = realloc(q->queue, q->q_alloc * sizeof(qentry_t));
-    }
-
-    // Reclaim string storage.  Same basic rules as above.
-    if(q->str_alloc > ((q->str_tail - q->str_head) << 3)
-       && q->str_alloc > INIT_STRSIZE) {
-        if(q->str_head)
-            strings_shift(q);
-        q->str_alloc >>= 1;
-        dmn_log_debug("strq: downsizing strings to %u bytes", q->str_alloc);
-        q->strings = realloc(q->strings, q->str_alloc);
-    }
-
-    assert_queue_sane(q);
-}
-
 void strq_destroy(strq_t* q) {
-    ev_timer_stop(q->loop, q->reclaim_timer);
-    free(q->reclaim_timer);
-    free(q->strings);
+    /* This could free all the storage on shutdown, but seems wasteful
+       unless we need it later for valgrind clarity
+    size_t q_idx = q->q_head;
+    while(q_idx != q->q_tail) {
+        qentry_t* qe = q->queue[q_idx];
+        free(qe->str);
+        q_idx++;
+        q->q_idx &= (q->q_alloc - 1U); // mod po2 to wrap
+    }
+    */
     free(q->queue);
     free(q);
 }

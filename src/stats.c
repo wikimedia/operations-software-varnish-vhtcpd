@@ -56,16 +56,16 @@ static void log_stats(ev_tstamp now) {
                      " inpkts_enqueued: %" PRIu64
                      " inpkts_dequeued: %" PRIu64
                      " inpkts_sent: %" PRIu64
-                     " queue_overflows: %" PRIu64
                      " queue_size: %" PRIu64
-                     " queue_max_size: %" PRIu64,
+                     " queue_max_size: %" PRIu64
+                     " queue_mem: %" PRIu64,
                      i,
                      stats.purgers[i].inpkts_enqueued,
                      stats.purgers[i].inpkts_dequeued,
                      stats.purgers[i].inpkts_sent,
-                     stats.purgers[i].queue_overflows,
                      stats.purgers[i].queue_size,
-                     stats.purgers[i].queue_max_size
+                     stats.purgers[i].queue_max_size,
+                     stats.purgers[i].queue_mem
         );
     }
 }
@@ -101,17 +101,17 @@ static void write_stats_file(ev_tstamp now) {
                 " inpkts_enqueued:%" PRIu64
                 " inpkts_dequeued:%" PRIu64
                 " inpkts_sent:%" PRIu64
-                " queue_overflows:%" PRIu64
                 " queue_size:%" PRIu64
                 " queue_max_size:%" PRIu64
+                " queue_mem:%" PRIu64
                 "\n",
                 i,
                 stats.purgers[i].inpkts_enqueued,
                 stats.purgers[i].inpkts_dequeued,
                 stats.purgers[i].inpkts_sent,
-                stats.purgers[i].queue_overflows,
                 stats.purgers[i].queue_size,
-                stats.purgers[i].queue_max_size
+                stats.purgers[i].queue_max_size,
+                stats.purgers[i].queue_mem
         );
 
         if(fpf_rv < 0) {

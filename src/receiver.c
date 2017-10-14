@@ -44,6 +44,9 @@
 //   common networks, this should be plenty.
 #define INBUF_SIZE 4096
 
+// this buffer holds a fully-formed HTTP request to purge a single URL
+#define OUTBUF_SIZE 4096U
+
 // How many pending packets we'll dequeue from the kernel
 //   (and potentially regex-filter to /dev/null)
 //   in a tight loop before giving control back to libev
@@ -196,7 +199,7 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         struct http_parser_url up;
         memset(&up, 0, sizeof(struct http_parser_url));
         if(http_parser_parse_url(url, url_len, 0, &up) || ((up.field_set & uf_hostpath) != uf_hostpath)) {
-            dmn_log_warn("Rejecting enqueued URL, cannot parse host + path: %s", url);
+            dmn_log_warn("Rejecting received URL, cannot parse host + path: %s", url);
             continue;
         }
 
@@ -238,8 +241,8 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
 
         dmn_log_debug("receiver: packet %u passed regex filter...", MAX_TIGHT_RECV - recv_ctr);
 
-        // encode an output buffer, purger->strq will copy, so use local mem
-        char buf[buf_len];
+        // encode an output buffer in new storage
+        char* buf = malloc(buf_len);
         char* writeptr = &buf[0];
         memcpy(writeptr, out_prefix, out_prefix_len); writeptr += out_prefix_len;
         memcpy(writeptr,   path_etc,   path_etc_len); writeptr +=   path_etc_len;
@@ -247,13 +250,12 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         memcpy(writeptr,         hn,         hn_len); writeptr +=         hn_len;
         memcpy(writeptr, out_suffix, out_suffix_len); // writeptr += out_suffix_len;
 
-        // send to purger's input queue
+        // send to purger's input queue (now owns the malloc)
         purger_enqueue(r->purger, buf, buf_len);
         queued_ctr--;
     }
 
     dmn_log_debug("receiver: done recv()ing, enqueued: %u", MAX_TIGHT_QUEUE - queued_ctr);
-    purger_ping(r->purger);
 }
 
 receiver_t* receiver_new(struct ev_loop* loop, const pcre* matcher, const pcre_extra* matcher_extra, purger_t* purger, int lsock, bool purge_full_url) {

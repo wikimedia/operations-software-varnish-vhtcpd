@@ -5,10 +5,10 @@
 #include "stats.h"
 #include "libdmn/dmn.h"
 
-static const char test_str_1[] = "Test string #1";
-static const char test_str_2[] = " - Test string #2, which happens to be a bit larger";
-static const unsigned test_len_1 = sizeof(test_str_1) - 1;
-static const unsigned test_len_2 = sizeof(test_str_2) - 1;
+static char test_str_1[] = "Test string #1";
+static char test_str_2[] = " - Test string #2, which happens to be a bit larger";
+static const size_t test_len_1 = sizeof(test_str_1) - 1;
+static const size_t test_len_2 = sizeof(test_str_2) - 1;
 
 #define TST(msg, ...) do { \
     if(!(__VA_ARGS__)) \
@@ -20,46 +20,37 @@ int main(int argc, char* argv[]) {
     dmn_log_info("%s", argv[argc - 1]);
     struct ev_loop* loop = ev_loop_new(0);
     stats_init(loop, "/tmp/testme", 1);
-    strq_t* q = strq_new(loop, &stats.purgers[0], 2);
+    strq_t* q = strq_new(&stats.purgers[0]);
 
-    const char* deq_str = NULL;
-    unsigned deq_len = 0;
+    const qentry_t* qe = NULL;
 
     // Basic initial tests
 
-    TST("empty initial queue", strq_is_empty(q));
-    deq_str = strq_dequeue(q, &deq_len);
-    TST("empty initial dequeue", !deq_str && !deq_len);
+    qe = strq_dequeue(q);
+    TST("empty initial dequeue", !qe);
 
-    strq_enqueue(q, test_str_1, test_len_1);
-    deq_len = 0;
-    TST("not-empty after one insert", !strq_is_empty(q));
-    deq_str = strq_dequeue(q, &deq_len);
-    TST("correct result dequeueing non-empty dequeue", deq_str && deq_len && !strcmp(test_str_1, deq_str));
-    TST("empty again after one cycle", strq_is_empty(q));
+    strq_enqueue(q, test_str_1, test_len_1, 0);
+    qe = strq_dequeue(q);
+    TST("correct result dequeueing non-empty dequeue: exists", qe);
+    TST("correct result dequeueing non-empty dequeue: len-match", qe->len == test_len_1);
+    TST("correct result dequeueing non-empty dequeue: data-match", !memcmp(test_str_1, qe->str, test_len_1));
+    TST("empty again after one cycle", !strq_dequeue(q));
 
     // Start 8K seq deq
 
     for(unsigned i = 0; i < 8000; i++) {
-        strq_enqueue(q, test_str_1, test_len_1);
-        strq_enqueue(q, test_str_2, test_len_2);
+        strq_enqueue(q, test_str_1, test_len_1, 0);
+        strq_enqueue(q, test_str_2, test_len_2, 0);
     }
 
     for(unsigned i = 0; i < 8000; i++) {
-        TST("not-empty during 8k seq deq", !strq_is_empty(q));
-        deq_len = 0;
-        deq_str = strq_dequeue(q, &deq_len);
-        TST("correct result during 8k seq deq", deq_str && deq_len && !strcmp(test_str_1, deq_str));
-        TST("not-empty during 8k seq deq", !strq_is_empty(q));
-        deq_len = 0;
-        deq_str = strq_dequeue(q, &deq_len);
-        TST("correct result during 8k seq deq", deq_str && deq_len && !strcmp(test_str_2, deq_str));
+        qe = strq_dequeue(q);
+        TST("correct result during 8k seq deq", qe && qe->str && qe->len == test_len_1 && !memcmp(test_str_1, qe->str, test_len_1));
+        qe = strq_dequeue(q);
+        TST("correct result during 8k seq deq", qe && qe->str && qe->len == test_len_2 && !memcmp(test_str_2, qe->str, test_len_2));
     }
 
-    TST("empty queue post-8k", strq_is_empty(q));
-    deq_len = 0;
-    deq_str = strq_dequeue(q, &deq_len);
-    TST("empty dequeue post-8k", !deq_str && !deq_len);
+    TST("empty queue post-8k", !strq_dequeue(q));
 
     strq_destroy(q);
     ev_loop_destroy(loop);
