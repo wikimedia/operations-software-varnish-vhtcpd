@@ -31,6 +31,10 @@
 #include "libdmn/dmn.h"
 #include "config.h"
 
+// Tune jemalloc for our single-threaded usecase?
+#include <jemalloc/jemalloc.h>
+const char* malloc_conf = "narenas:1,tcache:false";
+
 /* global libev priorities:
  *  2) receiver input
  *  1) purger i/o
