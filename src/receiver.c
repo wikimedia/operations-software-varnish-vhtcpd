@@ -153,15 +153,17 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
            dmn_log_fatal("UDP socket error: %s", dmn_strerror(errno));
         }
         // dmn_log_debug("receiver: processing packet %u ...", MAX_TIGHT_RECV - recv_ctr);
-        stats.inpkts_recvd++;
+        stats.recvd++;
 
         if(recvrv > INBUF_SIZE) {
             dmn_log_warn("Rejecting HTCP packet, size larger than %d", INBUF_SIZE);
+            stats.bad++;
             continue; // too big, drop the request but keep looping
         }
 
         if(recvrv < 20) {
             dmn_log_warn("Rejecting HTCP packet, size smaller than 20");
+            stats.bad++;
             continue; // too small to have a valid request in it
         }
 
@@ -173,6 +175,7 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         //   very very minimalistic about validating the data.
         if(r->inbuf[6] != 4U) { // CLR opcode
             dmn_log_warn("Rejecting HTCP packet, no CLR opcode");
+            stats.bad++;
             continue;
         }
 
@@ -181,15 +184,18 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         offs += method_len; // skip method
         if((offs + 2U) >= (unsigned)recvrv) {
             dmn_log_warn("Rejecting HTCP packet, URL len field runs off end of packet");
+            stats.bad++;
             continue;
         }
         unsigned url_len = ntohs(get_una16(&r->inbuf[offs])); offs += 2;
         if(!url_len) {
             dmn_log_warn("Rejecting HTCP packet, URL len is zero");
+            stats.bad++;
             continue;
         }
         if((offs + url_len) > (unsigned)recvrv) {
             dmn_log_warn("Rejecting HTCP packet, URL runs off end of packet");
+            stats.bad++;
             continue;
         }
         r->inbuf[offs + url_len] = '\0'; // inject NUL-terminator in the buffer
@@ -200,6 +206,7 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         memset(&up, 0, sizeof(struct http_parser_url));
         if(http_parser_parse_url(url, url_len, 0, &up) || ((up.field_set & uf_hostpath) != uf_hostpath)) {
             dmn_log_warn("Rejecting received URL, cannot parse host + path: %s", url);
+            stats.bad++;
             continue;
         }
 
@@ -221,10 +228,9 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         const unsigned buf_len = out_prefix_len + path_etc_len + out_middle_len + hn_len + out_suffix_len;
         if(buf_len > OUTBUF_SIZE) {
             dmn_log_warn("Rejecting URL for excessive size: %s", url);
+            stats.bad++;
             continue;
         }
-
-        stats.inpkts_sane++;
 
         // dmn_log_debug("receiver: packet %u passed sanity filters...", MAX_TIGHT_RECV - recv_ctr);
 
@@ -235,6 +241,7 @@ static void receiver_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             if(pcre_rv < 0) { // match failed, or an error occured
                 if(pcre_rv != PCRE_ERROR_NOMATCH)
                     dmn_log_err("Error executing regex matcher: PCRE error code: %d", pcre_rv);
+                stats.filtered++;
                 continue;
             }
         }

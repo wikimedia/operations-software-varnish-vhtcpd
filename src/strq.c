@@ -30,16 +30,14 @@
 // MUST be a power of 2
 #define INIT_QSIZE 1024U
 
+// head==tail means empty queue
 struct strq {
     qentry_t* queue; // the queue itself
-
-    // The queue itself wraps around.  head == tail
-    //  could mean empty or full, depends on size.
-    size_t q_head;    // always mod q_alloc
-    size_t q_tail;    // always mod q_alloc
-    size_t q_alloc;   // allocated slots of "queue" above
-    size_t q_size;    // used from allocation, always < q_alloc
-
+    size_t    head;  // always mod q_alloc
+    size_t    tail;  // always mod q_alloc
+    size_t    alloc; // allocated slots of "queue" above
+    size_t    size;  // used from allocation, always < q_alloc
+    size_t    mem;   // total memory used by queue+strs
     purger_stats_t* pstats;
 };
 
@@ -51,27 +49,27 @@ struct strq {
 
 static void assert_queue_sane(strq_t* q) {
     dmn_assert(q);
-    dmn_assert(q->q_alloc);
-    dmn_assert(q->q_size < q->q_alloc);
-    dmn_assert(q->q_head < q->q_alloc);
-    dmn_assert(q->q_tail < q->q_alloc);
-    if(q->q_size) {
-        // queue_mem assert only assumes bare min 1 byte strings
-        dmn_assert(q->pstats->queue_mem >= (q->q_alloc * sizeof(qentry_t)) + q->q_size);
-        dmn_assert(q->q_head != q->q_tail);
-        const size_t itermask = q->q_alloc - 1;
-        size_t i = q->q_head;
+    dmn_assert(q->alloc);
+    dmn_assert(q->size < q->alloc);
+    dmn_assert(q->head < q->alloc);
+    dmn_assert(q->tail < q->alloc);
+    if(q->size) {
+        // q_mem assert only assumes bare min 1 byte strings
+        dmn_assert(q->mem >= (q->alloc * sizeof(qentry_t)) + q->size);
+        dmn_assert(q->head != q->tail);
+        const size_t itermask = q->alloc - 1;
+        size_t i = q->head;
         do {
             qentry_t* qe = &q->queue[i];
             dmn_assert(qe->str);
             dmn_assert(qe->len);
             i++;
             i &= itermask;
-        } while(i != q->q_tail);
+        } while(i != q->tail);
     }
     else {
-       // when queue is empty, queue_mem should reflect allocated structures
-       dmn_assert(q->pstats->queue_mem == (q->q_alloc * sizeof(qentry_t)));
+       // when queue is empty, q_mem should reflect allocated structures
+       dmn_assert(q->mem == (q->alloc * sizeof(qentry_t)));
     }
 }
 
@@ -82,9 +80,9 @@ strq_t* strq_new(purger_stats_t* pstats) {
 
     strq_t* q = calloc(1, sizeof(*q));
     q->pstats = pstats;
-    q->q_alloc = INIT_QSIZE;
-    q->pstats->queue_mem = q->q_alloc * sizeof(*q->queue);
-    q->queue = malloc(q->pstats->queue_mem);
+    q->alloc = INIT_QSIZE;
+    q->mem = q->alloc * sizeof(*q->queue);
+    q->queue = malloc(q->mem);
     return q;
 }
 
@@ -92,19 +90,19 @@ const qentry_t* strq_dequeue(strq_t* q) {
     dmn_assert(q);
 
     const qentry_t* qe = NULL;
-    if(q->q_size) {
-        qe = &q->queue[q->q_head];
+    if(q->size) {
+        qe = &q->queue[q->head];
         dmn_assert(qe->str);
         dmn_assert(qe->len);
-        q->pstats->queue_mem -= qe->len;
-        q->pstats->inpkts_dequeued++;
-        q->q_head++;
-        q->q_head &= (q->q_alloc - 1U); // mod po2 to wrap
-        q->q_size--;
-        q->pstats->queue_size--;
+        q->head++;
+        q->head &= (q->alloc - 1U); // mod po2 to wrap
+        q->size--;
+        q->pstats->q_size = q->size;
+        q->mem -= qe->len;
+        q->pstats->q_mem = q->mem;
 
-        if(!q->q_size)
-            q->q_head = q->q_tail = 0;
+        if(!q->size)
+            q->head = q->tail = 0;
 
         assert_queue_sane(q);
     }
@@ -115,41 +113,44 @@ void strq_enqueue(strq_t* q, char* new_string, const size_t len, const ev_tstamp
     dmn_assert(q); dmn_assert(new_string); dmn_assert(len);
 
     // account for new string in all stats and qsize
-    q->pstats->queue_mem += len;
-    q->pstats->queue_size++;
-    q->pstats->inpkts_enqueued++;
-    q->q_size++;
-    if(q->q_size > q->pstats->queue_max_size)
-        q->pstats->queue_max_size = q->q_size;
+    q->size++;
+    q->pstats->q_size = q->size;
+    if(q->size > q->pstats->q_max_size)
+        q->pstats->q_max_size = q->size;
 
     // handle queue re-allocation if this bump fills us.
     //   note this "wastes" the final slot by reallocating early,
     //   but the upside is q_head != q_tail unless the queue is empty,
     //   which makes other logic simpler
-    if(q->q_size == q->q_alloc) {
+    if(q->size == q->alloc) {
         // first, double the raw space
-        const size_t old_alloc = q->q_alloc;
-        q->q_alloc <<= 1;
-        dmn_log_debug("strq: realloc queue to %zu entries", q->q_alloc);
-        q->queue = realloc(q->queue, q->q_alloc * sizeof(*q->queue));
-        q->pstats->queue_mem += (old_alloc * sizeof(*q->queue));
+        const size_t old_alloc = q->alloc;
+        q->alloc <<= 1;
+        dmn_log_debug("strq: realloc queue to %zu entries", q->alloc);
+        q->queue = realloc(q->queue, q->alloc * sizeof(*q->queue));
+        q->mem += (old_alloc * sizeof(*q->queue));
         // then, move the wrapped tail end to the physical end of
         //   the original allocation
-        if(q->q_head) {
-            dmn_assert(q->q_tail < old_alloc); // memcpy doesn't overlap
-            memcpy(&q->queue[old_alloc], q->queue, q->q_tail * sizeof(qentry_t));
-            q->q_tail += old_alloc;
+        if(q->head) {
+            dmn_assert(q->tail < old_alloc); // memcpy doesn't overlap
+            memcpy(&q->queue[old_alloc], q->queue, q->tail * sizeof(qentry_t));
+            q->tail += old_alloc;
         }
-        dmn_assert(q->q_tail < q->q_alloc); // new tail within new storage
+        dmn_assert(q->tail < q->alloc); // new tail within new storage
     }
 
+    q->mem += len;
+    q->pstats->q_mem = q->mem;
+    if(q->mem > q->pstats->q_max_mem)
+        q->pstats->q_max_mem = q->mem;
+
     // update tail pointer
-    qentry_t* qe = &q->queue[q->q_tail];
+    qentry_t* qe = &q->queue[q->tail];
     qe->str = new_string;
     qe->len = len;
     qe->stamp = stamp;
-    q->q_tail++;
-    q->q_tail &= (q->q_alloc - 1); // mod po2 to wrap
+    q->tail++;
+    q->tail &= (q->alloc - 1); // mod po2 to wrap
 
     assert_queue_sane(q);
 }
@@ -157,12 +158,12 @@ void strq_enqueue(strq_t* q, char* new_string, const size_t len, const ev_tstamp
 void strq_destroy(strq_t* q) {
     /* This could free all the storage on shutdown, but seems wasteful
        unless we need it later for valgrind clarity
-    size_t q_idx = q->q_head;
-    while(q_idx != q->q_tail) {
+    size_t q_idx = q->head;
+    while(q_idx != q->tail) {
         qentry_t* qe = q->queue[q_idx];
         free(qe->str);
         q_idx++;
-        q->q_idx &= (q->q_alloc - 1U); // mod po2 to wrap
+        q->idx &= (q->alloc - 1U); // mod po2 to wrap
     }
     */
     free(q->queue);

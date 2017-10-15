@@ -6,17 +6,18 @@
 #include <ev.h>
 
 typedef struct {
-    uint64_t inpkts_enqueued;
-    uint64_t inpkts_dequeued;
-    uint64_t inpkts_sent;
-    uint64_t queue_size;
-    uint64_t queue_max_size;
-    uint64_t queue_mem;
+    uint64_t input;
+    uint64_t failed;
+    uint64_t q_size;
+    uint64_t q_mem;
+    uint64_t q_max_size;
+    uint64_t q_max_mem;
 } purger_stats_t;
 
 typedef struct {
-    uint64_t inpkts_recvd;
-    uint64_t inpkts_sane;
+    uint64_t recvd;
+    uint64_t bad;
+    uint64_t filtered;
     purger_stats_t* purgers;
 } stats_t;
 

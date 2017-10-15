@@ -39,33 +39,35 @@ static char* outfn;
 static char* outfn_tmp;
 
 static void log_stats(ev_tstamp now) {
-    dmn_log_info("Receiver: start: %" PRIu64
+    dmn_log_info("start: %" PRIu64
                  " uptime: %" PRIu64
-                 " inpkts_recvd: %" PRIu64
-                 " inpkts_sane: %" PRIu64
-                 " purgers: %u",
+                 " purgers: %u"
+                 " recvd: %" PRIu64
+                 " bad: %" PRIu64
+                 " filtered: %" PRIu64,
                  (uint64_t)start_time,
                  (uint64_t)(now - start_time),
-                 stats.inpkts_recvd,
-                 stats.inpkts_sane,
-                 num_purgers
+                 num_purgers,
+                 stats.recvd,
+                 stats.bad,
+                 stats.filtered
     );
 
     for (unsigned i = 0; i < num_purgers; i++) {
         dmn_log_info("Purger%u: "
-                     " inpkts_enqueued: %" PRIu64
-                     " inpkts_dequeued: %" PRIu64
-                     " inpkts_sent: %" PRIu64
-                     " queue_size: %" PRIu64
-                     " queue_max_size: %" PRIu64
-                     " queue_mem: %" PRIu64,
+                     " input: %" PRIu64
+                     " failed: %" PRIu64
+                     " q_size: %" PRIu64
+                     " q_mem: %" PRIu64
+                     " q_max_size: %" PRIu64
+                     " q_max_mem: %" PRIu64,
                      i,
-                     stats.purgers[i].inpkts_enqueued,
-                     stats.purgers[i].inpkts_dequeued,
-                     stats.purgers[i].inpkts_sent,
-                     stats.purgers[i].queue_size,
-                     stats.purgers[i].queue_max_size,
-                     stats.purgers[i].queue_mem
+                     stats.purgers[i].input,
+                     stats.purgers[i].failed,
+                     stats.purgers[i].q_size,
+                     stats.purgers[i].q_mem,
+                     stats.purgers[i].q_max_size,
+                     stats.purgers[i].q_max_mem
         );
     }
 }
@@ -80,14 +82,17 @@ static void write_stats_file(ev_tstamp now) {
     int fpf_rv = fprintf(outfile,
                  "start:%" PRIu64
                  " uptime:%" PRIu64
-                 " inpkts_recvd:%" PRIu64
-                 " inpkts_sane:%" PRIu64
-                 " purgers:%u\n",
+                 " purgers:%u"
+                 " recvd:%" PRIu64
+                 " bad:%" PRIu64
+                 " filtered:%" PRIu64
+                 "\n",
                  (uint64_t)start_time,
                  (uint64_t)(now - start_time),
-                 stats.inpkts_recvd,
-                 stats.inpkts_sane,
-                 num_purgers
+                 num_purgers,
+                 stats.recvd,
+                 stats.bad,
+                 stats.filtered
     );
     if(fpf_rv < 0) {
         dmn_log_err("Failed to write data to stats tmpfile '%s': %s", outfn_tmp, dmn_logf_errno());
@@ -98,20 +103,20 @@ static void write_stats_file(ev_tstamp now) {
     for (unsigned i = 0; i < num_purgers; i++) {
         fprintf(outfile,
                 "Purger%u:"
-                " inpkts_enqueued:%" PRIu64
-                " inpkts_dequeued:%" PRIu64
-                " inpkts_sent:%" PRIu64
-                " queue_size:%" PRIu64
-                " queue_max_size:%" PRIu64
-                " queue_mem:%" PRIu64
+                " input:%" PRIu64
+                " failed:%" PRIu64
+                " q_size:%" PRIu64
+                " q_mem:%" PRIu64
+                " q_max_size:%" PRIu64
+                " q_max_mem:%" PRIu64
                 "\n",
                 i,
-                stats.purgers[i].inpkts_enqueued,
-                stats.purgers[i].inpkts_dequeued,
-                stats.purgers[i].inpkts_sent,
-                stats.purgers[i].queue_size,
-                stats.purgers[i].queue_max_size,
-                stats.purgers[i].queue_mem
+                stats.purgers[i].input,
+                stats.purgers[i].failed,
+                stats.purgers[i].q_size,
+                stats.purgers[i].q_mem,
+                stats.purgers[i].q_max_size,
+                stats.purgers[i].q_max_mem
         );
 
         if(fpf_rv < 0) {

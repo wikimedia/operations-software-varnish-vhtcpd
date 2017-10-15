@@ -585,6 +585,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     if(p->parser->http_errno != HPE_OK || hpe_parsed != recvd) { // not parseable, could be more trailing garbage, close it all down
         dmn_log_err("TCP conn to %s: response unparseable (parser error %s), dropping request", dmn_logf_anysin(&p->daddr), http_errno_description(p->parser->http_errno));
         on_txn_boundary(p, BUFF_FREE, CONN_RECONNECT);
+        p->pstats->failed++;
         return;
     }
     else if(pr.cb_called) { // parsed a full response
@@ -602,10 +603,10 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             else {
                 on_txn_boundary(p, BUFF_FREE, pr.need_to_close);
             }
-            p->pstats->inpkts_sent++;
         }
         else {
             dmn_log_warn("PURGE response code was was >= 400");
+            p->pstats->failed++;
             on_txn_boundary(p, BUFF_FREE, pr.need_to_close);
         }
     }
@@ -700,6 +701,7 @@ void purger_enqueue(purger_t* p, char* req, const size_t req_len) {
     dmn_log_debug("purger: %s/%s -> purger_enqueue()", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
     purger_assert_sanity(p);
 
+    p->pstats->input++;
     strq_enqueue(p->queue, req, req_len, ev_now(p->loop) + p->delay);
 
     // In all other states we'll check the queue later on our own.  With
