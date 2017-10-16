@@ -1,8 +1,8 @@
 AC_PREREQ([2.68])
-AC_INIT([vhtcpd],[0.0.11],[bblack@wikimedia.org],[vhtcpd],[https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git])
+AC_INIT([vhtcpd],[0.1.0],[bblack@wikimedia.org],[vhtcpd],[https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git])
 AC_CONFIG_SRCDIR([src/main.c])
 AC_CONFIG_AUX_DIR([acaux])
-AM_INIT_AUTOMAKE([1.11.3 dist-xz no-dist-gzip foreign tar-ustar -Wall])
+AM_INIT_AUTOMAKE([1.11.3 subdir-objects dist-xz no-dist-gzip foreign tar-ustar -Wall])
 AC_CONFIG_MACRO_DIR([m4])
 
 dnl TODO: when/if a new autoconf release has a C11 macro,
@@ -29,6 +29,20 @@ LT_PREREQ([2.4.2])
 
 dnl include libdmn configure stuff (only sets some config.h stuff)
 m4_include([src/libdmn/libdmn.m4])
+
+dnl libev, libpcre, libjemalloc
+AC_CHECK_DECLS([EVBREAK_ALL],,AC_MSG_ERROR([libev 4.x headers not found!]),[
+    #include <ev.h>
+])
+AC_CHECK_DECLS([pcre_compile],,AC_MSG_ERROR([libpcre headers not found!]),[
+    #include <pcre.h>
+])
+AC_CHECK_DECLS([malloc_conf],,AC_MSG_ERROR([libjemalloc headers not found!]),[
+    #include <jemalloc/jemalloc.h>
+])
+AC_CHECK_LIB([ev],[ev_break],,AC_MSG_ERROR([libev 4.x library not found!]))
+AC_CHECK_LIB([pcre],[pcre_compile],,AC_MSG_ERROR([libpcre library not found!]))
+AC_CHECK_LIB([jemalloc],[malloc_stats_print],,AC_MSG_ERROR([libjemalloc library not found!]))
 
 dnl Check for --enable-developer
 developer=no

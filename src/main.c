@@ -1,4 +1,4 @@
-/* Copyright © 2013 Brandon L Black <bblack@wikimedia.org>
+/* Copyright © 2013-2017 Brandon L Black <bblack@wikimedia.org>
  *
  * This file is part of vhtcpd.
  *
