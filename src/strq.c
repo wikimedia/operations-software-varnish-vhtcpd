@@ -38,6 +38,7 @@ struct strq {
     size_t    alloc; // allocated slots of "queue" above
     size_t    size;  // used from allocation, always < q_alloc
     size_t    mem;   // total memory used by queue+strs
+    size_t    shrink_limit; // will not shrink "alloc" below this...
     purger_stats_t* pstats;
 };
 
@@ -81,9 +82,61 @@ strq_t* strq_new(purger_stats_t* pstats) {
     strq_t* q = calloc(1, sizeof(*q));
     q->pstats = pstats;
     q->alloc = INIT_QSIZE;
+    q->shrink_limit = INIT_QSIZE;
     q->mem = q->alloc * sizeof(*q->queue);
     q->queue = malloc(q->mem);
     return q;
+}
+
+static void strq_grow(strq_t* q) {
+    dmn_assert(q);
+
+    // first, double the raw space
+    const size_t old_alloc = q->alloc;
+    q->alloc <<= 1;
+    dmn_log_debug("strq: realloc queue to %zu entries", q->alloc);
+    q->queue = realloc(q->queue, q->alloc * sizeof(*q->queue));
+    q->mem += (old_alloc * sizeof(*q->queue));
+    // if there's a wrapped tail, unwrap it
+    if(q->head) {
+        dmn_assert(q->tail < old_alloc); // memcpy doesn't overlap
+        memcpy(&q->queue[old_alloc], q->queue, q->tail * sizeof(qentry_t));
+    }
+    q->tail += old_alloc;
+    dmn_assert(q->tail < q->alloc); // new tail within new storage
+}
+
+static void strq_shrink(strq_t* q) {
+    dmn_assert(q);
+
+    // If the current queue contents wrap over the end of the space,
+    // we'll need to first un-wrap them by shifting the tail portion at
+    // the bottom forward and then copying the head portion down to the
+    // start.  We know there's more than enough space to do this because
+    // we only trigger on < 1/8 total allocation fill.
+    if(q->tail < q->head) {
+        const size_t head_end_bytes = q->alloc - q->head;
+        memmove(&q->queue[head_end_bytes], q->queue, q->tail * sizeof(*q->queue));
+        memcpy(q->queue, &q->queue[q->head], head_end_bytes * sizeof(*q->queue));
+        q->tail = q->size;
+        q->head = 0;
+    }
+
+    // Otherwise if we have a normal non-wrapped queue whose contents
+    // intrude on the upper half about to be freed, copy it down:
+    else if(q->tail >= (q->alloc >> 1)) {
+        memcpy(q->queue, &q->queue[q->head], q->size * sizeof(*q->queue));
+        q->tail = q->size;
+        q->head = 0;
+    }
+
+    // Now that the above has ensured the queue contents are non-wrapped
+    // and fit within the first half of the buffer, do the shrink:
+    q->alloc >>= 1;
+    const size_t new_size = q->alloc * sizeof(*q->queue);
+    q->mem -= new_size;
+    dmn_log_debug("strq: realloc queue to %zu entries", q->alloc);
+    q->queue = realloc(q->queue, new_size);
 }
 
 const qentry_t* strq_dequeue(strq_t* q) {
@@ -91,6 +144,9 @@ const qentry_t* strq_dequeue(strq_t* q) {
 
     const qentry_t* qe = NULL;
     if(q->size) {
+        // shrink by half if above shrink_limit && qsize <= alloc/8
+        if(q->alloc > q->shrink_limit && q->size <= (q->alloc >> 3))
+            strq_shrink(q);
         qe = &q->queue[q->head];
         dmn_assert(qe->str);
         dmn_assert(qe->len);
@@ -115,34 +171,17 @@ void strq_enqueue(strq_t* q, char* new_string, const size_t len, const ev_tstamp
     // account for new string in all stats and qsize
     q->size++;
     q->pstats->q_size = q->size;
-    if(q->size > q->pstats->q_max_size)
+    if(q->size > q->pstats->q_max_size) {
         q->pstats->q_max_size = q->size;
-
-    // handle queue re-allocation if this bump fills us.
-    //   note this "wastes" the final slot by reallocating early,
-    //   but the upside is q_head != q_tail unless the queue is empty,
-    //   which makes other logic simpler
-    if(q->size == q->alloc) {
-        // first, double the raw space
-        const size_t old_alloc = q->alloc;
-        q->alloc <<= 1;
-        dmn_log_debug("strq: realloc queue to %zu entries", q->alloc);
-        q->queue = realloc(q->queue, q->alloc * sizeof(*q->queue));
-        q->mem += (old_alloc * sizeof(*q->queue));
-        // then, move the wrapped tail end to the physical end of
-        //   the original allocation
-        if(q->head) {
-            dmn_assert(q->tail < old_alloc); // memcpy doesn't overlap
-            memcpy(&q->queue[old_alloc], q->queue, q->tail * sizeof(qentry_t));
-            q->tail += old_alloc;
-        }
-        dmn_assert(q->tail < q->alloc); // new tail within new storage
+	// shrink_limit starts at INIT_QSIZE, then grows to a
+	// non-power-of-two size of max_size/4 over time as max_size
+	// rises.  The actual power-of-two we halve to on shrinking will
+	// therefore be somewhere in the range of 1/8 to 1/4 of the
+	// max_size at any given time.
+	const size_t max_size_quarter = q->size >> 2;
+        if(max_size_quarter > q->shrink_limit)
+            q->shrink_limit = max_size_quarter;
     }
-
-    q->mem += len;
-    q->pstats->q_mem = q->mem;
-    if(q->mem > q->pstats->q_max_mem)
-        q->pstats->q_max_mem = q->mem;
 
     // update tail pointer
     qentry_t* qe = &q->queue[q->tail];
@@ -151,6 +190,18 @@ void strq_enqueue(strq_t* q, char* new_string, const size_t len, const ev_tstamp
     qe->stamp = stamp;
     q->tail++;
     q->tail &= (q->alloc - 1); // mod po2 to wrap
+    q->mem += len;
+
+    // Grow queue by doubling if completely full
+    if(q->size == q->alloc) {
+        dmn_assert(q->tail == q->head);
+        strq_grow(q); // will grow q->mem too
+        dmn_assert(q->tail != q->head);
+    }
+
+    q->pstats->q_mem = q->mem;
+    if(q->mem > q->pstats->q_max_mem)
+        q->pstats->q_max_mem = q->mem;
 
     assert_queue_sane(q);
 }
