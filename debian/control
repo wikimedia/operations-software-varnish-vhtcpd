@@ -2,7 +2,7 @@ Source: vhtcpd
 Section: web
 Priority: extra
 Maintainer: Brandon Black <bblack@wikimedia.org>
-Build-Depends: debhelper (>= 8.0.0), autotools-dev, dh-autoreconf, libpcre3-dev, libev-dev
+Build-Depends: debhelper (>= 8.0.0), autotools-dev, dh-autoreconf, libpcre3-dev, libev-dev, libjemalloc-dev
 Standards-Version: 3.9.3
 Homepage: https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git
 #Vcs-Git: https://gerrit.wikimedia.org/r/operations/software/varnish/vhtcpd
