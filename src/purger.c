@@ -628,6 +628,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     switch(p->state) {
         case PST_CONN_IDLE:
             // reached fd persistence timeout during idle state
+            dmn_log_info("Disconnecting from %s due to persistence time limit", dmn_logf_anysin(&p->daddr));
             do_reconnect_socket(p);
             break;
         case PST_CONN_QDEL:
