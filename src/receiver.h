@@ -6,7 +6,6 @@
 #include <pcre.h>
 #include <ev.h>
 #include "libdmn/dmn.h"
-#include "strq.h"
 #include "purger.h"
 
 struct receiver;
@@ -22,10 +21,9 @@ receiver_t* receiver_new(
     struct ev_loop* loop,
     const pcre* matcher,
     const pcre_extra* matcher_extra,
-    strq_t* queue,
-    purger_t** purgers,
-    unsigned num_purgers,
-    int lsock
+    purger_t* purger,
+    int lsock,
+    bool purge_full_url
 );
 void receiver_destroy(receiver_t* r);
 

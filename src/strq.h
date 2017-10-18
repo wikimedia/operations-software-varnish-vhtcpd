@@ -3,45 +3,38 @@
 #define VHTCPD_STRQ_H
 
 #include <ev.h>
+#include "stats.h"
 
 /*
  * This is a single-threaded queue of strings with
  *  its own storage for the string data.  Sizes are
  *  unlimited, and storage will auto-grow if necc
- *  during enqueue.  Storage is downsized if excess
- *  space is very excessive, once in a while on a low
- *  priority libev callback.
- * There are a fixed count of virtual heads on this queue,
- *  the idea being that multiple independent dequeuers can
- *  work through the entries, and entries are not removed
- *  from the head until all virtual heads have advanced past
- *  an entry.
+ *  during enqueue.
  */
+
+typedef struct {
+    char* str;
+    size_t len;
+    ev_tstamp stamp;
+} qentry_t;
 
 struct strq;
 typedef struct strq strq_t;
 
 // Create a new queue for strings
-strq_t* strq_new(struct ev_loop* loop, unsigned max_mb, unsigned num_vheads);
+strq_t* strq_new(purger_stats_t* pstats);
 
-// Anything pending for this vhead?
-unsigned strq_is_empty(const strq_t* q, unsigned vhead);
+// Add a new string onto the tail of the queue.  len cannot be zero.
+// strq takes ownership of the string allocation at enqueue time.
+void strq_enqueue(strq_t* q, char* new_string, const size_t len, const ev_tstamp stamp);
 
-// Remove a string from the queue.  NULL retval
-//   if queue is empty.  Note that the returned string
-//   storage is owned by the queue, and is considered
-//   invalid as soon as any other write operation on
-//   the queue occurs.  *len_outptr is set to the same
-//   value strlen() would calculate on the returned
-//   string (which we already had cached), and is not
-//   set at all if the retval is NULL.
-// Basically any return to libev or any call other than _get_size()
-//   is going to invalidate the string.
-const char* strq_dequeue(strq_t* q, unsigned* len_outptr, unsigned vhead);
-
-// Copy a new string onto the tail of the queue.  Must be
-//   NUL-terminated, and "len" should be the strlen() length of it.
-void strq_enqueue(strq_t* q, const char* new_string, unsigned len);
+// Remove a string from the queue.  NULL retval if queue is empty.
+// The queue owns the qentry_t storage, which is only valid until the
+// next strq operation (in other words, consume it and forget it
+// immediately after this call).  The actual string in qentry_t->str,
+// however, is owned by the caller from dequeue onwards, and it is up to
+// the caller to free it.
+const qentry_t* strq_dequeue(strq_t* q);
 
 // Destroy the whole queue, rendering the passed pointer invalid
 void strq_destroy(strq_t* q);

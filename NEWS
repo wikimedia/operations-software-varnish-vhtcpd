@@ -1,3 +1,40 @@
+0.1.0 - 2017-10-15
+  * Embedded http-parser from joyent upgraded from 2.1 to 2.7.1
+  * The hardcoded limit for PURGEs sent over a single outbound
+    connection before we recycle it has increased from 10K to 100K (the
+    15-minute limit for the same remains).
+  * The maximum wait time between retrying failed purger connect()
+    attempts has reduced from 32s to 8s.
+  * The purgers never wait to reconnect after a disconnect when their
+    queue is idle; they now immediately connect on startup, and always
+    reconnect immediately on disconnect.
+  * The memory size of queue objects has grown - they're now stored in
+    the form of their eventual outbound raw HTTP PURGE request, rather
+    than just as the URL (basically, the parsing of URLs and generation
+    of HTTP PURGE text has moved upstream of the queueing).
+  * Each purger now has its own separate purge queue
+  * The purgers' queues are connected serially in the order the purgers
+    are specified on the commandline.  The first purger must completely
+    process a purge (including http response) before it will forward
+    that purge to the queue of the next.
+  * Each purger queue has a configurable delay specified in
+    floating-point seconds.  The default is 0.0, and the minimum
+    non-zero configurable value is 0.1.  Purge requests are forced to
+    wait in a purger's queue for this amount of time before being
+    forwarded.  For the first purger the time starts on HTCP reception.
+    For the remainder, the time starts when they receive a forwarded
+    purge from an earlier purger.
+  * Better checking of PURGE response parsing errors
+  * Stats output (file+syslog) has changed substantially.
+  * All failed purges now affect both a stats counter and emit a log
+    message.  Previously, some types of failure would just do one and
+    not the other.
+  * Queue string storage is now managed by malloc rather than a local
+    custom storage pool.
+  * Queue metadata storage now shrinks after spikes (within reason)
+  * libjemalloc is linked and slightly tunedfor improved malloc perf.
+  * Substantial internal refactoring/simplification.
+
 0.0.11 - 2016-01-22
   wrapped complex assert funcs in NDEBUG checks to make sure they
     don't affect NDEBUG builds

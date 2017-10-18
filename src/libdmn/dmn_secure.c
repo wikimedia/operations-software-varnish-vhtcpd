@@ -41,8 +41,6 @@ static char* secure_chroot = NULL;
 static bool is_secured = false;
 
 void dmn_secure_setup(const char* username, const char* chroot_path) {
-    dmn_assert(username);
-
     // This isn't really a security thing, we'd fail somewhere else along the line anyways,
     //   it's just a handy error bailout to point out developer bugs in using these interfaces.
     if(geteuid())

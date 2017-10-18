@@ -1,4 +1,4 @@
-/* Copyright © 2013 Brandon L Black <bblack@wikimedia.org>
+/* Copyright © 2013-2017 Brandon L Black <bblack@wikimedia.org>
  *
  * This file is part of vhtcpd.
  *
@@ -27,27 +27,28 @@
 #include <ev.h>
 #include "purger.h"
 #include "receiver.h"
-#include "strq.h"
 #include "stats.h"
 #include "libdmn/dmn.h"
 #include "config.h"
 
+// Tune jemalloc for our single-threaded usecase?
+#include <jemalloc/jemalloc.h>
+const char* malloc_conf = "narenas:1,tcache:false";
+
 /* global libev priorities:
  *  2) receiver input
  *  1) purger i/o
- *  0) purger idle timer
- * -1) strq excess space reclamation
+ *  0) purger timeouts/timers
+ * -1) <unused>
  * -2) stats/monitor stuff...
  */
 
 static const char def_ifaddr[] = "0.0.0.0:4827";
 #define DEF_USERNAME PACKAGE_NAME
 #define DEF_PIDFILE VHTCPD_SYSRUNDIR "/" PACKAGE_NAME ".pid"
-#define DEF_Q_MB 256U
 #define DEF_MCAST_PORT 4827U
 #define DEF_STATS_FILE "/tmp/" PACKAGE_NAME ".stats"
 #define DEF_IO_TIMEOUT 57U
-#define DEF_IDLE_TIMEOUT 23U
 
 static void usage(const char* argv0) {
     fprintf(stderr, PACKAGE_NAME " " PACKAGE_VERSION "\nUsage:\n"
@@ -55,7 +56,7 @@ static void usage(const char* argv0) {
 #ifndef NDEBUG
         "[-d] "
 #endif
-        "[-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-l %u] [-s %s] [-t %u] [-T %u] -m mcast_addr -c cache_addr_port <action>\n"
+        "[-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-s %s] [-t %u] -m mcast_addr -c cache_addr_port <action>\n"
 #ifndef NDEBUG
         "  -d -- Extra debug logging for developer build\n"
 #endif
@@ -64,12 +65,11 @@ static void usage(const char* argv0) {
         "  -p -- Pidfile pathname\n"
         "  -a -- Multicast local listen IP[:Port] (port defaults to %u)\n"
         "  -r -- Regex filter for valid purge hostnames (PCRE case-insensitive, default unfiltered)\n"
-        "  -l -- Queue limit in MB\n"
         "  -s -- Stats output filename\n"
         "  -t -- I/O timeout for purgers\n"
-        "  -T -- Idle connection timeout for purgers\n"
         "  -m -- Multicast address (required, multiple allowed)\n"
-        "  -c -- Cache IP:Port or Hostname:Port (required, multiple allowed)\n"
+        "  -c -- Cache IP:Port[,delay] or Hostname:Port[,delay]"
+        "        ^ (required, multiple allowed, delay optional, def delay 0, min non-zero delay 0.1)\n"
         "<action> is one of:\n"
         "  startfg - Start " PACKAGE_NAME " in foreground w/ logs to stderr\n"
         "  start - Start " PACKAGE_NAME " as a regular daemon\n"
@@ -80,8 +80,8 @@ static void usage(const char* argv0) {
         "  condrestart - Does 'restart' action only if already running\n"
         "  try-restart - Aliases 'condrestart'\n"
         "  status - Checks the status of the running daemon\n\n",
-    argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_Q_MB, DEF_STATS_FILE,
-    DEF_IO_TIMEOUT, DEF_IDLE_TIMEOUT, DEF_MCAST_PORT);
+    argv0, DEF_USERNAME, DEF_PIDFILE, def_ifaddr, DEF_STATS_FILE,
+    DEF_IO_TIMEOUT, DEF_MCAST_PORT);
     exit(99);
 }
 
@@ -128,16 +128,15 @@ typedef struct {
     bool debug;
     bool purge_full_url;
     int lsock;
-    unsigned max_queue_mb;
     unsigned num_purgers;
     unsigned io_timeout;
-    unsigned idle_timeout;
     char* username;
     char* pidfile;
     char* statsfile;
     pcre* matcher;
     pcre_extra* matcher_extra;
     dmn_anysin_t* purger_addrs;
+    double* purger_delays;
 } cfg_t;
 
 static cfg_t* handle_args(int argc, char* argv[]) {
@@ -152,22 +151,32 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     // Basic cmdline parse
     int optch;
-    while((optch = getopt(argc, argv, "dFt:T:u:p:a:r:l:m:c:")) != -1) {
+    while((optch = getopt(argc, argv, "a:c:dFl:m:p:r:s:T:t:u:")) != -1) {
         switch(optch) {
+            case 'a':
+                if_addr = optarg;
+                break;
+            case 'c':
+                num_purgers++;
+                purger_addrs = realloc(purger_addrs, num_purgers * sizeof(char*));
+                purger_addrs[num_purgers - 1] = optarg;
+                break;
             case 'd':
                 cfg->debug = true;
                 break;
             case 'F':
                 cfg->purge_full_url = true;
                 break;
-            case 'u':
-                cfg->username = strdup(optarg);
+            case 'l':
+                // ignore removed option for basic backcompat
+                break;
+            case 'm':
+                num_mcs++;
+                mc_addrs = realloc(mc_addrs, num_mcs * sizeof(char*));
+                mc_addrs[num_mcs - 1] = optarg;
                 break;
             case 'p':
                 cfg->pidfile = strdup(optarg);
-                break;
-            case 'a':
-                if_addr = optarg;
                 break;
             case 'r':
                 match_str = optarg;
@@ -175,24 +184,14 @@ static cfg_t* handle_args(int argc, char* argv[]) {
             case 's':
                 cfg->statsfile = strdup(optarg);
                 break;
-            case 'l':
-                cfg->max_queue_mb = (unsigned)atoi(optarg);
+            case 'T':
+                // ignore removed option for basic backcompat
                 break;
             case 't':
                 cfg->io_timeout = (unsigned)atoi(optarg);
                 break;
-            case 'T':
-                cfg->idle_timeout = (unsigned)atoi(optarg);
-                break;
-            case 'm':
-                num_mcs++;
-                mc_addrs = realloc(mc_addrs, num_mcs * sizeof(char*));
-                mc_addrs[num_mcs - 1] = optarg;
-                break;
-            case 'c':
-                num_purgers++;
-                purger_addrs = realloc(purger_addrs, num_purgers * sizeof(char*));
-                purger_addrs[num_purgers - 1] = optarg;
+            case 'u':
+                cfg->username = strdup(optarg);
                 break;
             default:
                 usage(argv[0]);
@@ -206,14 +205,10 @@ static cfg_t* handle_args(int argc, char* argv[]) {
         cfg->pidfile = strdup(DEF_PIDFILE);
     if(!if_addr)
         if_addr = def_ifaddr;
-    if(!cfg->max_queue_mb)
-        cfg->max_queue_mb = DEF_Q_MB;
     if(!cfg->statsfile)
         cfg->statsfile = strdup(DEF_STATS_FILE);
     if(!cfg->io_timeout)
         cfg->io_timeout = DEF_IO_TIMEOUT;
-    if(!cfg->idle_timeout)
-        cfg->idle_timeout = DEF_IDLE_TIMEOUT;
 
     // require final non-option for action
     if(optind != (argc - 1)) {
@@ -280,10 +275,6 @@ static cfg_t* handle_args(int argc, char* argv[]) {
         dmn_secure_setup(cfg->username, NULL);
 
     // Check basic things
-    if(cfg->max_queue_mb > 2000 || cfg->max_queue_mb < 8) {
-        dmn_log_err("Argument -l %u out of valid range (8-2000)", cfg->max_queue_mb);
-        usage(argv[0]);
-    }
     if(!num_mcs) {
         dmn_log_err("Argument -m mcast_addr required!");
         usage(argv[0]);
@@ -330,7 +321,26 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     cfg->num_purgers = num_purgers;
     cfg->purger_addrs = calloc(num_purgers, sizeof(dmn_anysin_t));
+    cfg->purger_delays = calloc(num_purgers, sizeof(double));
     for(unsigned i = 0; i < num_purgers; i++) {
+        char* comma = strchr(purger_addrs[i], ',');
+        if(comma) {
+            *comma++ = '\0'; // inject NUL here to make addr parsing sane later
+            char* endptr = NULL;
+            errno = 0;
+            double delay = strtod(comma, &endptr);
+            if(endptr == comma || errno)
+                dmn_log_fatal("Failed to parse a valid floating-point delay from '%s'", comma);
+            if(delay < 0.1) {
+                dmn_log_warn("delays '%s' increased to the minimum of 0.1s", comma);
+                cfg->purger_delays[i] = 0.1;
+            }
+            else {
+                cfg->purger_delays[i] = delay;
+            }
+        } else {
+            cfg->purger_delays[i] = 0.0;
+        }
         addr_err = dmn_anysin_fromstr(purger_addrs[i], 0, &cfg->purger_addrs[i], false);
         if(addr_err)
             dmn_log_fatal("Invalid cache address:port '%s': %s", purger_addrs[i], gai_strerror(addr_err));
@@ -387,41 +397,77 @@ static void setup_signals(struct ev_loop* loop) {
     ev_signal_start(loop, sig_term);
 }
 
+#ifndef NDEBUG
+static void debug_prep_cb(struct ev_loop *loop, ev_prepare *w, int revents) {
+    dmn_assert(loop); dmn_assert(w); dmn_assert(revents == EV_PREPARE);
+    dmn_log_debug("------------------------------ Re-entered eventloop for waiting");
+}
+#endif
+
 int main(int argc, char* argv[]) {
     // Parse args, do config/setup/daemonization tasks
     cfg_t* cfg = handle_args(argc, argv);
 
     // Basic libev setup
     ev_set_syserr_cb(syserr_for_ev);
-    struct ev_loop* loop = ev_loop_new(0);
+    struct ev_loop* loop = ev_default_loop(EVBACKEND_SELECT);
     setup_signals(loop);
-    ev_set_timeout_collect_interval(loop, 0.1);
+
+    // Determine minimum of the non-zero queue delays, and use 1/10th
+    // this value as our timeout collect interval, with the maximum
+    // clamped at ~0.1, and the implicit minimum at ~0.01 due to the
+    // lower bound on the delay values.
+    double io_interval = 0.1;
+    for(unsigned i = 0; i < cfg->num_purgers; i++) {
+        if(cfg->purger_delays[i] > 0.0 && cfg->purger_delays[i] < 1.0) {
+            double one_tenth = cfg->purger_delays[i] / 10.0;
+            if(one_tenth < io_interval)
+                io_interval = one_tenth;
+        }
+    }
+    dmn_log_info("libev timeout collection interval set to %.3f", io_interval);
+    ev_set_timeout_collect_interval(loop, io_interval);
 
     // stats has a timeout callback for reporting
-    stats_init(loop, cfg->statsfile);
+    stats_init(loop, cfg->statsfile, cfg->num_purgers);
 
-    // set up the string queue
-    strq_t* queue = strq_new(loop, cfg->max_queue_mb, cfg->num_purgers);
+    // print purger configs in ascending order to reduce user confusion
+    for(unsigned i = 0; i < cfg->num_purgers; i++) {
+        dmn_log_info("Configuring purger %u for %s with delay %.3f", i, dmn_logf_anysin(&cfg->purger_addrs[i]), cfg->purger_delays[i]);
+    }
 
-    // set up an array of purger objects
+    // set up an array of purger objects, and initialize them in reverse
+    // order so we can set up the purger->purger queueing chain
     purgers = malloc(cfg->num_purgers * sizeof(purger_t*));
-    for(unsigned i = 0; i < cfg->num_purgers; i++)
-        purgers[i] = purger_new(loop, &cfg->purger_addrs[i], queue, i, cfg->purge_full_url, cfg->io_timeout, cfg->idle_timeout);
+    {
+        purger_t* next_purger = NULL;
+        unsigned i = cfg->num_purgers - 1;
+        do {
+            purger_stats_t* pstats = &stats.purgers[i];
+            purgers[i] = purger_new(loop, &cfg->purger_addrs[i], next_purger, pstats, cfg->io_timeout, cfg->purger_delays[i]);
+            next_purger = purgers[i];
+        } while(i--);
+    }
 
-    // set up the singular receiver
+    // set up the singular receiver, with purger[0] as the dequeur
     receiver_t* receiver = receiver_new(
         loop,
         cfg->matcher,
         cfg->matcher_extra,
-        queue,
-        purgers,
-        cfg->num_purgers,
-        cfg->lsock
+        purgers[0],
+        cfg->lsock,
+        cfg->purge_full_url
     );
 
     // Finish daemonization (release initial process and stderr)
     if(cfg->action != ACT_STARTFG)
        dmn_daemonize_finish();
+
+#ifndef NDEBUG
+    ev_prepare* debug_prep = malloc(sizeof(ev_prepare));
+    ev_prepare_init(debug_prep, debug_prep_cb);
+    ev_prepare_start(loop, debug_prep);
+#endif
 
     // All runtime executes here...
     ev_run(loop, 0);
@@ -430,7 +476,6 @@ int main(int argc, char* argv[]) {
     receiver_destroy(receiver);
     for(unsigned i = 0; i < cfg->num_purgers; i++)
         purger_destroy(purgers[i]);
-    strq_destroy(queue);
     ev_loop_destroy(loop);
     cfg_destroy(cfg);
 
