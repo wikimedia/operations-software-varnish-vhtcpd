@@ -56,10 +56,11 @@ static void usage(const char* argv0) {
 #ifndef NDEBUG
         "[-d] "
 #endif
-        "[-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-s %s] [-t %u] -m mcast_addr -c cache_addr_port <action>\n"
+        "[-v] [-F] [-u %s] [-p %s] [-a %s] [-r host_regex] [-s %s] [-t %u] -m mcast_addr -c cache_addr_port <action>\n"
 #ifndef NDEBUG
         "  -d -- Extra debug logging for developer build\n"
 #endif
+        "  -v -- Verbose logging\n"
         "  -F -- Use full absolute URL in PURGE request\n"
         "  -u -- Username for privilege drop\n"
         "  -p -- Pidfile pathname\n"
@@ -126,6 +127,7 @@ static action_t match_action(const char* arg) {
 typedef struct {
     action_t action;
     bool debug;
+    bool verbose;
     bool purge_full_url;
     int lsock;
     unsigned num_purgers;
@@ -151,7 +153,7 @@ static cfg_t* handle_args(int argc, char* argv[]) {
 
     // Basic cmdline parse
     int optch;
-    while((optch = getopt(argc, argv, "a:c:dFl:m:p:r:s:T:t:u:")) != -1) {
+    while((optch = getopt(argc, argv, "a:c:dFl:m:p:r:s:T:t:u:v")) != -1) {
         switch(optch) {
             case 'a':
                 if_addr = optarg;
@@ -192,6 +194,9 @@ static cfg_t* handle_args(int argc, char* argv[]) {
                 break;
             case 'u':
                 cfg->username = strdup(optarg);
+                break;
+            case 'v':
+                cfg->verbose = true;
                 break;
             default:
                 usage(argv[0]);
@@ -444,7 +449,7 @@ int main(int argc, char* argv[]) {
         unsigned i = cfg->num_purgers - 1;
         do {
             purger_stats_t* pstats = &stats.purgers[i];
-            purgers[i] = purger_new(loop, &cfg->purger_addrs[i], next_purger, pstats, cfg->io_timeout, cfg->purger_delays[i]);
+            purgers[i] = purger_new(loop, &cfg->purger_addrs[i], next_purger, pstats, cfg->io_timeout, cfg->purger_delays[i], cfg->verbose);
             next_purger = purgers[i];
         } while(i--);
     }

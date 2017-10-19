@@ -157,6 +157,7 @@ struct purger {
     ev_io* read_watcher;
     ev_timer* timeout_watcher;
     http_parser* parser;
+    bool verbose;
 };
 
 typedef struct {
@@ -341,7 +342,8 @@ static void on_txn_boundary(purger_t* p, const buff_disp_t bd, const conn_disp_t
         dmn_log_debug("purger: %s/%s -> on_txn_boundary() commanded to reconnect", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
         do_reconnect_socket(p);
     } else if(p->fd_expire <= now) {
-        dmn_log_info("Disconnecting from %s due to persistence time limit", dmn_logf_anysin(&p->daddr));
+        if(p->verbose)
+            dmn_log_info("Disconnecting from %s due to persistence time limit", dmn_logf_anysin(&p->daddr));
         do_reconnect_socket(p);
     } else if(idle) {
         dmn_log_debug("purger: %s/%s -> on_txn_boundary() transition to PST_CONN_IDLE", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
@@ -368,7 +370,8 @@ static void on_connect_success(purger_t* p) {
     dmn_assert(p);
     dmn_assert(p->state == PST_CONNECTING);
 
-    dmn_log_info("TCP connection established to %s", dmn_logf_anysin(&p->daddr));
+    if(p->verbose)
+        dmn_log_info("TCP connection established to %s", dmn_logf_anysin(&p->daddr));
     p->fd_expire = ev_now(p->loop) + PERSIST_TIME;
     p->conn_wait_timeout = CONN_WAIT_INIT;
     ev_io_stop(p->loop, p->write_watcher);
@@ -468,7 +471,8 @@ static void purger_write_req(purger_t* p, const bool via_watcher) {
             case EHOSTUNREACH:
             case ENETUNREACH:
             case EPIPE:
-                dmn_log_info("TCP conn to %s failed while writing: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
+                if(p->verbose)
+                    dmn_log_info("TCP conn to %s failed while writing: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
                 break;
             default:
                 dmn_log_err("TCP conn to %s failed while writing: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
@@ -538,7 +542,8 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             case ETIMEDOUT:
             case EPIPE:
                 // "normal" problems, no need to log about it
-                dmn_log_info("TCP conn to %s failed while reading: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
+                if(p->verbose)
+                    dmn_log_info("TCP conn to %s failed while reading: %s", dmn_logf_anysin(&p->daddr), dmn_logf_errno());
                 break;
             default:
                 // abormal problems, mention it in the log
@@ -553,15 +558,18 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     // From here we actually got some data...
 
     if(p->state != PST_RECVWAIT) {
-        if(recvd == 0)
-            dmn_log_info("TCP conn to %s: server closed cleanly", dmn_logf_anysin(&p->daddr));
-        else
+        if(recvd == 0) {
+            if(p->verbose)
+                dmn_log_info("TCP conn to %s: server closed cleanly", dmn_logf_anysin(&p->daddr));
+        } else {
             dmn_log_err("TCP conn to %s: received unexpected data from server during request-send or idle phases...", dmn_logf_anysin(&p->daddr));
+        }
         on_txn_boundary(p, BUFF_PRESERVE, CONN_RECONNECT);
         return;
     }
     else if(recvd == 0) {
-        dmn_log_err("TCP conn to %s: connection closed while waiting on response", dmn_logf_anysin(&p->daddr));
+        if(p->verbose)
+            dmn_log_info("TCP conn to %s: connection closed while waiting on response", dmn_logf_anysin(&p->daddr));
         on_txn_boundary(p, BUFF_PRESERVE, CONN_RECONNECT);
         return;
     }
@@ -572,7 +580,8 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
         //  complete and we'll get another recv callback to finish up.
         p->inbuf_size <<= 1;
         p->inbuf = realloc(p->inbuf, p->inbuf_size);
-        dmn_log_info("TCP recv buffer for %s grew to %zu", dmn_logf_anysin(&p->daddr), p->inbuf_size);
+        if(p->verbose)
+            dmn_log_info("TCP recv buffer for %s grew to %zu", dmn_logf_anysin(&p->daddr), p->inbuf_size);
     }
 
     if(!p->inbuf_parsed) // first read
@@ -591,7 +600,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
     else if(pr.cb_called) { // parsed a full response
         dmn_log_debug("purger: %s/%s -> purger_read_cb silent result: successful response parsed", dmn_logf_anysin(&p->daddr), state_strs[p->state]);
 
-        if(pr.need_to_close)
+        if(pr.need_to_close && p->verbose)
             dmn_log_info("TCP conn to %s: server response asked us to close connection, doing so...", dmn_logf_anysin(&p->daddr));
 
         // Only forward to next purger and mark sent in stats if status was reasonable
@@ -628,7 +637,8 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     switch(p->state) {
         case PST_CONN_IDLE:
             // reached fd persistence timeout during idle state
-            dmn_log_info("Disconnecting from %s due to persistence time limit", dmn_logf_anysin(&p->daddr));
+            if(p->verbose)
+                dmn_log_info("Disconnecting from %s due to persistence time limit", dmn_logf_anysin(&p->daddr));
             do_reconnect_socket(p);
             break;
         case PST_CONN_QDEL:
@@ -659,7 +669,7 @@ static void purger_timeout_cb(struct ev_loop* loop, ev_timer* w, int revents) {
     }
 }
 
-purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, purger_t* next_purger, purger_stats_t* pstats, unsigned io_timeout, double delay) {
+purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, purger_t* next_purger, purger_stats_t* pstats, unsigned io_timeout, double delay, bool verbose) {
     purger_t* p = calloc(1, sizeof(purger_t));
     p->pstats = pstats;
     p->fd = -1;
@@ -673,6 +683,7 @@ purger_t* purger_new(struct ev_loop* loop, const dmn_anysin_t* daddr, purger_t* 
     p->io_timeout = io_timeout;
     p->delay = delay;
     p->conn_wait_timeout = CONN_WAIT_INIT;
+    p->verbose = verbose;
 
     memcpy(&p->daddr, daddr, sizeof(dmn_anysin_t));
 
