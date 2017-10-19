@@ -1,3 +1,10 @@
+0.1.1 - 2017-10-19
+  * Fixed one missing case where there was no log output on TCP
+    disconnect (reaching the peristence timer during the idle state).
+  * All TCP disconnect/reconnect logging is now suppressed by default, but can
+    be enabled (even in non-debug builds) with the new "-v" commandline
+    argument for "verbose logging".
+
 0.1.0 - 2017-10-15
   * Embedded http-parser from joyent upgraded from 2.1 to 2.7.1
   * The hardcoded limit for PURGEs sent over a single outbound
