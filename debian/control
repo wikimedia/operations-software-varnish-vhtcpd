@@ -2,15 +2,16 @@ Source: vhtcpd
 Section: web
 Priority: extra
 Maintainer: Brandon Black <bblack@wikimedia.org>
-Build-Depends: debhelper (>= 8.0.0), autotools-dev, dh-autoreconf, libpcre3-dev, libev-dev, libjemalloc-dev
-Standards-Version: 3.9.3
+Uploaders: Emanuele Rocca <ema@wikimedia.org>
+Build-Depends: debhelper (>= 9.0.0), autotools-dev, dh-autoreconf, libpcre3-dev, libev-dev, libjemalloc-dev
+Standards-Version: 3.9.8
 Homepage: https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git
 #Vcs-Git: https://gerrit.wikimedia.org/r/operations/software/varnish/vhtcpd
 #Vcs-Browser: https://gerrit.wikimedia.org/r/gitweb?p=operations/software/varnish/vhtcpd.git
 
 Package: vhtcpd
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, adduser
+Depends: ${shlibs:Depends}, ${misc:Depends}, adduser, lsb-base
 Description: HTCP-to-PURGE forwarder for Varnish
  A network daemon that listens for multicast HTCP cache purge requests
  and forwards them to Varnish via the HTTP PURGE method.

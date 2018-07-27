@@ -1,3 +1,15 @@
+vhtcpd (0.1.1-2) stretch-wikimedia; urgency=medium
+
+  * Target stretch-wikimedia. (Bug: T200445)
+  * gbp.conf: rename git-buildpackage to buildpackage, add
+    git-submodules=true to fetch src/http-parser/. Remove taball-dir to
+    autogenerate tarball.
+  * Depend on lsb-base because of debian/vhtcpd.init.d.
+  * Bump debhelper compatibility level to 9 and Standards-Version to 3.9.8.
+  * Add myself to Uploaders.
+
+ -- Emanuele Rocca <ema@wikimedia.org>  Fri, 27 Jul 2018 10:46:31 +0200
+
 vhtcpd (0.1.1-1) unstable; urgency=low
 
   * bump "upstream" for updates
