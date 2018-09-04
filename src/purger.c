@@ -174,7 +174,7 @@ static int msg_complete_cb(http_parser* p) {
 
     pr->cb_called = true;
     pr->need_to_close = http_should_keep_alive(p) ? CONN_PRESERVE : CONN_RECONNECT;
-    pr->status_ok = p->status_code < 400;
+    pr->status_ok = p->status_code < 400 || p->status_code == 404;
 
     return 0;
 }
@@ -614,7 +614,7 @@ static void purger_read_cb(struct ev_loop* loop, ev_io* w, int revents) {
             }
         }
         else {
-            dmn_log_warn("PURGE response code was was >= 400");
+            dmn_log_warn("PURGE response code was was >= 400 and != 404");
             p->pstats->failed++;
             on_txn_boundary(p, BUFF_FREE, pr.need_to_close);
         }
