@@ -1,3 +1,9 @@
+vhtcpd (0.1.2-1) stretch-wikimedia; urgency=medium
+
+  * New upstream release considering 404 responses as valid.
+
+ -- Emanuele Rocca <ema@wikimedia.org>  Tue, 04 Sep 2018 17:47:49 +0200
+
 vhtcpd (0.1.1-2) stretch-wikimedia; urgency=medium
 
   * Target stretch-wikimedia. (Bug: T200445)
