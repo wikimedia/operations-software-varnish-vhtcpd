@@ -1,3 +1,7 @@
+0.1.2 - 2018-09-04
+  * Consider 404 responses as valid
+  * Set q_mem + q_max_mem stats correctly at startup
+
 0.1.1 - 2017-10-19
   * Fixed one missing case where there was no log output on TCP
     disconnect (reaching the peristence timer during the idle state).

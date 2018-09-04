@@ -85,6 +85,8 @@ strq_t* strq_new(purger_stats_t* pstats) {
     q->shrink_limit = INIT_QSIZE;
     q->mem = q->alloc * sizeof(*q->queue);
     q->queue = malloc(q->mem);
+    q->pstats->q_mem = q->mem;
+    q->pstats->q_max_mem = q->mem;
     return q;
 }
 
