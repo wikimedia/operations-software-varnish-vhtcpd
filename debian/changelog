@@ -1,3 +1,10 @@
+vhtcpd (0.1.2-2) buster-wikimedia; urgency=medium
+
+  * Build for buster T242093.
+  * Added myself to the uploaders list.
+
+ -- Valentin Gutierrez <vgutierrez@wikimedia.org>  Web, 22 Jan 2020 14:40:00 +0000
+
 vhtcpd (0.1.2-1) stretch-wikimedia; urgency=medium
 
   * New upstream release considering 404 responses as valid.
